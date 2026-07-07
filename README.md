@@ -31,18 +31,7 @@ result = np.asarray(y.to_jax())
 
 See `example.py` for a full runnable demo, including nesting under `@jax.jit` and computing gradients via `jax.vjp`.
 
-## Layout
+## Currently Supported Ops
 
-```
-jask/
-├── base/         # DiskArray, SpillFile, Policy, OOCAlgorithm, make_jax_op
-└── linalg/       # dot
-benchmarks/       # scripts for memory / throughput / profiling measurements
-example.py        # minimal end-to-end demo
-```
-
-## Status
-
-v0 , one op (`dot`), forward + backward verified. No multi-op autodiff chaining yet
-(each op's output is a static handle to JAX, so cotangents don't flow across two
-disk-backed op boundaries automatically). Sequential CPU backend for now.
+- dot/matmul
+- Open a PR if you would like an Op supported.
