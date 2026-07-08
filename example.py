@@ -1,7 +1,7 @@
-"""Minimal end-to-end example of jask: a disk-backed matmul, differentiable
-and JIT-compatible, without ever materializing the full arrays in memory.
+"""Minimal end-to-end demo of jask: disk-backed arrays, differentiable and
+JIT-compatible, without ever materializing the full arrays in memory.
 
-Run with the environment that has jax installed, e.g.:
+Run with the environment that has jax installed:
     conda activate scipy-dev && python example.py
 """
 
@@ -12,7 +12,7 @@ import numpy as np
 import jax
 
 import jask
-from jask.base import DiskArray, gradient_of
+from jask.base import DiskArray
 
 
 def make_array(data: np.ndarray, page_shape: tuple) -> DiskArray:
@@ -27,55 +27,51 @@ def make_array(data: np.ndarray, page_shape: tuple) -> DiskArray:
 
 
 def main():
-    # Set once, process-wide , every jask op reads this, none of them take
-    # a policy/page_shape argument at the call site.
     jask.set_memory_budget("1GB")
 
     np.random.seed(0)
     A = np.random.rand(4, 6).astype(np.float32)
     B = np.random.rand(6, 4).astype(np.float32)
+    C = np.random.rand(4, 3).astype(np.float32)
+    T = np.random.rand(4, 3).astype(np.float32)
 
     a = make_array(A, page_shape=(2, 2))
     b = make_array(B, page_shape=(2, 2))
+    c = make_array(C, page_shape=(2, 2))
+    target = make_array(T, page_shape=(2, 2))
 
-    #  forward: disk-backed matmul, tiled under the hood 
+    # Forward: disk-backed matmul, tiled under the hood.
     y = jask.dot(a, b)
-    result = np.asarray(y.to_jax())  # explicit, deliberate materialization
-    print("forward result matches A @ B:", np.allclose(result, A @ B, atol=1e-4))
+    print("forward matches:", np.allclose(y.to_jax(), A @ B, atol=1e-4))
 
-    #  same call, nested inside an ordinary jax.jit'd function 
+    # Nested under jax.jit - jask ops compose with normal JAX transformations.
     @jax.jit
     def outer(a, b):
         return jask.dot(a, b)
 
-    y_jit = outer(a, b)
-    print(
-        "jit-nested result matches:",
-        np.allclose(np.asarray(y_jit.to_jax()), A @ B, atol=1e-4),
-    )
+    print("jit-nested matches:", np.allclose(outer(a, b).to_jax(), A @ B, atol=1e-4))
 
-    #  backward: explicit cotangent via jax.vjp 
-    # (jax.grad through a jnp.sum(y.to_jax())-style reduction isn't
-    # supported yet , to_jax() has no registered gradient rule, so
-    # autodiff can't connect a loss back through it. Supplying the
-    # cotangent directly is the currently-supported path.)
-    dC = np.random.rand(4, 4).astype(np.float32)
-    y2, pullback = jax.vjp(jask.dot, a, b)
+    # MSE loss end-to-end. Five disk-backed ops chained; jax.grad flows
+    # gradients disk-to-disk without materializing any intermediate array.
+    def mse_loss(a, b, c, target):
+        z = jask.dot(jask.dot(a, b), c)
+        diff = jask.sub(z, target)
+        sq = jask.square(diff)
+        return jask.materialize(jask.sum(sq))
 
-    mm = np.memmap(y2.filename, dtype=y2.dtype, mode="r+", shape=y2.full_shape)
-    mm[:] = dC
-    mm.flush()
+    grad_A, grad_B, grad_C = jax.grad(mse_loss, argnums=(0, 1, 2))(a, b, c, target)
+    dA = np.asarray(grad_A.grad.to_jax())
+    dB = np.asarray(grad_B.grad.to_jax())
+    dC = np.asarray(grad_C.grad.to_jax())
 
-    grad_a, grad_b = pullback(y2)
-    # grad_a/grad_b are placeholders (same identity as a/b) , the real
-    # gradient data lives at "<filename>.grad", retrieved via gradient_of.
-    dA = np.asarray(gradient_of(grad_a).to_jax())
-    dB = np.asarray(gradient_of(grad_b).to_jax())
+    diff = A @ B @ C - T
+    expected_dA = 2 * diff @ C.T @ B.T
+    expected_dB = A.T @ (2 * diff) @ C.T
+    expected_dC = (A @ B).T @ (2 * diff)
 
-    expected_dA = dC @ B.T
-    expected_dB = A.T @ dC
-    print("backward dA matches:", np.allclose(dA, expected_dA, atol=1e-3))
-    print("backward dB matches:", np.allclose(dB, expected_dB, atol=1e-3))
+    print("mse dA matches:", np.allclose(dA, expected_dA, atol=1e-3))
+    print("mse dB matches:", np.allclose(dB, expected_dB, atol=1e-3))
+    print("mse dC matches:", np.allclose(dC, expected_dC, atol=1e-3))
 
 
 if __name__ == "__main__":

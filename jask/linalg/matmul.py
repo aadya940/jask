@@ -4,7 +4,7 @@ from ..base import BlockParallelOp, make_jax_op, get_default_policy, derive_page
 # compiled function's shape, without this, dot() rebuilds Dot and re-JITs
 # via make_jax_op on every single call, forcing full retracing even for
 # repeated calls with identical shapes (e.g. every step of a training loop).
-# Keyed on policy's *stable* fields, not the whole Policy object — its
+# Keyed on policy's *stable* fields, not the whole Policy object - its
 # resident_pages field mutates at runtime and isn't part of the compiled
 # function's identity.
 _DOT_OP_CACHE: dict[tuple, tuple] = {}
@@ -44,7 +44,7 @@ def dot(a, b):
     """
     policy = get_default_policy()
     # Output block (i,j) must line up with A's row-blocks and B's col-blocks,
-    # since index_map addresses inputs by those same (i,j) coordinates —
+    # since index_map addresses inputs by those same (i,j) coordinates -
     # it can't be derived independently of a/b's own page_shape.
     page_shape = (a.page_shape[0], b.page_shape[1])
 

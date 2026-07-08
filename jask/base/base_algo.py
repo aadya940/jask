@@ -32,21 +32,20 @@ class OOCAlgorithm:
             # Plain per-call JIT, no vmap batching: profiling showed each
             # forward_block call here does real, substantial compute (single
             # large matmul), so per-call dispatch overhead was never the
-            # bottleneck — vmap's batched-matmul shape turned out harder for
+            # bottleneck - vmap's batched-matmul shape turned out harder for
             # XLA's CPU backend to parallelize well, plus jnp.stack itself
             # added real cost. This is the faster, simpler path for this
             # block size; vmap batching would only pay off for many small
             # blocks where dispatch overhead genuinely dominates.
             self._jit_forward_block = jax.jit(op.forward_block)
             # Tried donate_argnums=(1, 2) here (d_a/d_b's shapes match
-            # a_block/b_block's exactly, a real donation candidate) — but it
+            # a_block/b_block's exactly, a real donation candidate) - but it
             # conflicts with _ReusingBlockReader's caching: a donated block
             # later pulled from the reuse cache into another call crashes
             # with "Buffer has been deleted or donated", confirmed by
             # actually running it. Reverted; not compatible with the reuse
             # optimization as currently structured.
             self._jit_backward_block = jax.jit(op.backward_block)
-
 
     def run_forward(
         self,
@@ -104,7 +103,6 @@ class OOCAlgorithm:
         self._policy.mark_evicted()
         return acc
 
-
     def run_backward(
         self,
         inputs: list[DiskArray],
@@ -132,7 +130,7 @@ class OOCAlgorithm:
                 SpillFile.create(a.full_shape, a.dtype, a.page_shape) for a in inputs
             ]
         # Pre-decided filenames (e.g. from make_jax_op, so io_callback's
-        # declared and actual return structures match) — allocate them here.
+        # declared and actual return structures match) - allocate them here.
         for g in grad_handles:
             np.memmap(g.filename, dtype=g.dtype, mode="w+", shape=g.full_shape)
         return grad_handles
@@ -159,7 +157,7 @@ class OOCAlgorithm:
             grad_blocks = self._jit_backward_block(
                 d_out_block, *(blocks[k] for blocks in per_input_blocks)
             )
-            # Scatter-writes to K different grad-array locations — read-
+            # Scatter-writes to K different grad-array locations - read-
             # modify-write, since a block may receive contributions from
             # multiple output tiles (e.g. matmul's dB_kj summed over i).
             for grad_arr, grad_block, idx in zip(grads, grad_blocks, idxs):
@@ -196,7 +194,7 @@ def make_jax_op(
 
         return io_callback(
             lambda *hs: algo.run_forward(list(hs), output_page_shape, out_filename),
-            out_handle,  # zero-leaf static handle, not array data — see base_page's register_dataclass
+            out_handle,  # zero-leaf static handle, not array data - see base_page's register_dataclass
             *handles,
         )
 
@@ -208,12 +206,12 @@ def make_jax_op(
         """Compute gradients as a side effect, return placeholder cotangents."""
         handles = residuals
         # Real gradient goes to a deterministic path derived from each input's
-        # own filename — NOT a filename returned through JAX's cotangent
+        # own filename - NOT a filename returned through JAX's cotangent
         # machinery. Confirmed empirically: custom_vjp requires bwd's return
         # to match the primal args' pytree structure *exactly* (including
         # meta fields like filename), so any *new* filename either errors
         # (strict match) or gets silently discarded in favor of the primal's
-        # own aux (loosened match) — there is no way to hand back a genuinely
+        # own aux (loosened match) - there is no way to hand back a genuinely
         # different filename through the return value itself. So: write the
         # real gradient as a side effect at `<input filename>.grad`, and
         # return the primal handles themselves as the placeholder cotangent
@@ -222,11 +220,17 @@ def make_jax_op(
             DiskArray(h.filename + ".grad", h.full_shape, h.dtype, h.page_shape)
             for h in handles
         )
+        # d_out's filename slot points at the value file (JAX's treedef
+        # match constraint); real cotangent data lives at <that>.grad,
+        # written by the downstream op's f_bwd. Swap here before reading.
+        d_out_grad = DiskArray(
+            d_out.filename + ".grad", d_out.full_shape, d_out.dtype, d_out.page_shape
+        )
         io_callback(
             lambda *args: algo.run_backward(list(args[:-1]), args[-1], grad_handles),
             grad_handles,
             *handles,
-            d_out,
+            d_out_grad,
         )
         return handles
 
@@ -236,7 +240,7 @@ def make_jax_op(
 
 def gradient_of(handle: DiskArray) -> DiskArray:
     """After jax.grad, the returned handle is a placeholder (same identity as
-    the primal input) — the real gradient lives at `<filename>.grad`. Use
+    the primal input) - the real gradient lives at `<filename>.grad`. Use
     this to get a DiskArray pointing at the actual gradient data.
     """
     return DiskArray(

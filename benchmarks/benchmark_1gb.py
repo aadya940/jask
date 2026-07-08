@@ -3,7 +3,7 @@ Dask's own auto-chunker (128MB target) is forced to actually tile, unlike
 the earlier benchmark where arrays were too small to trigger real chunking.
 
 Chunk size (page_shape) is derived by jask itself from the memory budget,
-not hand-picked — jask.set_memory_budget(...) + derive_page_shape decide it,
+not hand-picked - jask.set_memory_budget(...) + derive_page_shape decide it,
 and jask.dot is called directly, no manual Policy/Dot/make_jax_op wiring.
 
 Run with: conda activate scipy-dev && python benchmark_1gb.py
@@ -20,7 +20,7 @@ import dask.array as da
 import jask
 from jask.base import DiskArray, get_default_policy, derive_page_shape
 
-# Real ext4-on-NVMe disk, not /tmp (which is tmpfs — RAM-backed, no real
+# Real ext4-on-NVMe disk, not /tmp (which is tmpfs - RAM-backed, no real
 # disk latency at all). Confirmed via `mount` before this benchmark.
 DISK_DIR = "/home/aadya-chinubhai/Desktop/projects/personal-projects/.benchdata"
 
@@ -56,7 +56,7 @@ def main():
     A = np.random.rand(N, N).astype(np.float32)
     B = np.random.rand(N, N).astype(np.float32)
 
-    # Reference for correctness — use a small submatrix only, since a full
+    # Reference for correctness - use a small submatrix only, since a full
     # 16384x16384 numpy matmul is itself a large, slow computation and not
     # the point of this benchmark.
     check_n = 512

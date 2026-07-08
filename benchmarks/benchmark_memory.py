@@ -1,10 +1,10 @@
 """Measure whether jask.dot's memory footprint stays flat as array size
-grows — the core "flat memory line" claim from the project spec.
+grows - the core "flat memory line" claim from the project spec.
 
 Each size N is run in a fresh subprocess so resource.getrusage's peak-RSS
 (a process-lifetime maximum, not a point-in-time snapshot) reflects only
 that one call. We also snapshot RSS immediately before and after the
-jask.dot call itself, reporting the delta — isolating its footprint from
+jask.dot call itself, reporting the delta - isolating its footprint from
 test-setup cost (np.random.rand allocating full A/B) and from the
 verification step (.to_jax() + naive `A @ B`), both of which are O(N^2)
 by design and would otherwise dominate the measurement.

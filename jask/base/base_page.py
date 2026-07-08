@@ -150,7 +150,7 @@ class DiskArray:
     # One tiny, real pytree leaf (content unused). Without at least one real
     # leaf somewhere in a custom_vjp call's arguments, JAX's autodiff treats
     # the whole call as having nothing to differentiate and silently skips
-    # invoking the backward rule entirely — confirmed empirically; every
+    # invoking the backward rule entirely - confirmed empirically; every
     # DiskArray needs this so gradients are actually computed regardless of
     # which/how many arguments in a given op call are disk-backed.
     _marker: jax.Array = field(default_factory=lambda: jnp.zeros(()), compare=False)
@@ -161,12 +161,12 @@ class DiskArray:
         return cls(filename, full_shape, dtype, page_shape)
 
     def _mmap(self, mode="r"):
-        # Cached per-instance, not globally — a permanent global dict keyed
+        # Cached per-instance, not globally - a permanent global dict keyed
         # by filename leaked memory badly (every file ever touched stayed
         # fully resident for the rest of the process, causing real OOMs
         # across multi-trial benchmarks). Within one algorithm call, the
         # same DiskArray Python objects (inputs/out/grads) are reused for
-        # the whole loop, so this still gives the caching benefit — and it's
+        # the whole loop, so this still gives the caching benefit - and it's
         # freed automatically via garbage collection once the call finishes
         # and local references drop, no manual eviction needed anywhere.
         # object.__setattr__ bypasses frozen=True for this internal cache.
@@ -178,19 +178,33 @@ class DiskArray:
             try:
                 cached._mmap.madvise(mmap.MADV_HUGEPAGE)
             except (AttributeError, OSError, ValueError):
-                pass  # not supported on this platform/kernel — non-fatal
+                pass  # not supported on this platform/kernel - non-fatal
             object.__setattr__(self, "_mmap_obj", cached)
         return cached
 
     def to_jax(self) -> jax.Array:
         """Explicitly materialize the whole array into device memory.
 
-        Only call this when the array is known to be small enough to fit —
+        Only call this when the array is known to be small enough to fit -
         it fully loads full_shape into RAM/device memory, defeating the
         out-of-core guarantee if used on something too big. No automatic
         or implicit path calls this; it exists as a deliberate escape hatch.
         """
         return jax.device_put(np.asarray(self._mmap(mode="r")))
+
+    @property
+    def grad(self) -> "DiskArray":
+        """DiskArray pointing at this array's gradient file (<filename>.grad).
+
+        f_bwd writes gradients as a side effect at <input_filename>.grad,
+        but returns the input handle itself as the cotangent placeholder
+        (JAX's custom_vjp requires the returned pytree structure to match
+        the primal input exactly, including meta fields like filename).
+        Use this to reach the real gradient data after jax.grad.
+        """
+        return DiskArray(
+            self.filename + ".grad", self.full_shape, self.dtype, self.page_shape
+        )
 
     def block_grid(self):
         return itertools.product(

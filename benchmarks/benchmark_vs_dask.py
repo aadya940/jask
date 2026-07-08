@@ -1,12 +1,12 @@
 """Forward-pass throughput: jask.dot vs dask.array matmul.
 
-Forward-only — Dask has no autodiff, so gradients aren't a comparison
+Forward-only - Dask has no autodiff, so gradients aren't a comparison
 point; that's jask's differentiator, not a speed claim.
 
 Measures three things per array size, over multiple trials:
-  - jask "as-used" (jask.dot(a,b) rebuilds and re-JITs the op every call —
+  - jask "as-used" (jask.dot(a,b) rebuilds and re-JITs the op every call -
     this is the honest cost of today's public API)
-  - jask "steady-state" (op built + JIT'd once, reused across calls — what
+  - jask "steady-state" (op built + JIT'd once, reused across calls - what
     it'd cost if make_jax_op's result were cached/reused, which it isn't yet)
   - dask.array, chunk size matched to jask's page_shape
   - dask.array, chunk size at Dask's own tuned default (128MB target)

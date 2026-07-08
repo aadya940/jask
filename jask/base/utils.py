@@ -1,4 +1,4 @@
-"""Small internal helpers used by OOCAlgorithm — not part of the public API."""
+"""Small internal helpers used by OOCAlgorithm - not part of the public API."""
 
 import jax
 
@@ -8,7 +8,7 @@ from .base_page import IOCost
 class _ReusingBlockReader:
     """Reads and device_puts blocks per input position, reusing the previous
     result when the requested block-index sequence is identical to last
-    time — e.g. matmul's A row-blocks repeat identically across every
+    time - e.g. matmul's A row-blocks repeat identically across every
     consecutive j for the same i. Not a general cache: only remembers the
     single most recent read per position, so it's freed automatically once
     the reader itself goes out of scope at the end of one run_forward/
