@@ -1,29 +1,15 @@
-"""Minimal end-to-end demo of jask: disk-backed arrays, differentiable and
+"""End-to-end demo of jask: disk-backed arrays, differentiable and
 JIT-compatible, without ever materializing the full arrays in memory.
 
-Run with the environment that has jax installed:
+Run with:
     conda activate scipy-dev && python example.py
 """
 
-import tempfile
-import os
-
 import numpy as np
 import jax
+import optax
 
 import jask
-from jask.base import DiskArray
-
-
-def make_array(data: np.ndarray, page_shape: tuple) -> DiskArray:
-    """Write a NumPy array to a temp file and wrap it as a DiskArray."""
-    fd, path = tempfile.mkstemp(suffix=".dat")
-    os.close(fd)
-    arr = DiskArray.create(path, data.shape, data.dtype, page_shape)
-    mm = arr._mmap(mode="r+")
-    mm[:] = data
-    mm.flush()
-    return arr
 
 
 def main():
@@ -35,34 +21,22 @@ def main():
     C = np.random.rand(4, 3).astype(np.float32)
     T = np.random.rand(4, 3).astype(np.float32)
 
-    a = make_array(A, page_shape=(2, 2))
-    b = make_array(B, page_shape=(2, 2))
-    c = make_array(C, page_shape=(2, 2))
-    target = make_array(T, page_shape=(2, 2))
+    a = jask.DiskArray.from_numpy(A)
+    b = jask.DiskArray.from_numpy(B)
+    c = jask.DiskArray.from_numpy(C)
+    target = jask.DiskArray.from_numpy(T)
 
-    # Forward: disk-backed matmul, tiled under the hood.
-    y = jask.dot(a, b)
-    print("forward matches:", np.allclose(y.to_jax(), A @ B, atol=1e-4))
-
-    # Nested under jax.jit - jask ops compose with normal JAX transformations.
-    @jax.jit
-    def outer(a, b):
-        return jask.dot(a, b)
-
-    print("jit-nested matches:", np.allclose(outer(a, b).to_jax(), A @ B, atol=1e-4))
-
-    # MSE loss end-to-end. Five disk-backed ops chained; jax.grad flows
-    # gradients disk-to-disk without materializing any intermediate array.
+    # Full MSE loss - hijax primitives compose naturally with jax.grad.
     def mse_loss(a, b, c, target):
         z = jask.dot(jask.dot(a, b), c)
         diff = jask.sub(z, target)
         sq = jask.square(diff)
-        return jask.materialize(jask.sum(sq))
+        return jask.sum(sq)
 
     grad_A, grad_B, grad_C = jax.grad(mse_loss, argnums=(0, 1, 2))(a, b, c, target)
-    dA = np.asarray(grad_A.grad.to_jax())
-    dB = np.asarray(grad_B.grad.to_jax())
-    dC = np.asarray(grad_C.grad.to_jax())
+    dA = np.asarray(grad_A.to_memmap())
+    dB = np.asarray(grad_B.to_memmap())
+    dC = np.asarray(grad_C.to_memmap())
 
     diff = A @ B @ C - T
     expected_dA = 2 * diff @ C.T @ B.T
@@ -72,6 +46,20 @@ def main():
     print("mse dA matches:", np.allclose(dA, expected_dA, atol=1e-3))
     print("mse dB matches:", np.allclose(dB, expected_dB, atol=1e-3))
     print("mse dC matches:", np.allclose(dC, expected_dC, atol=1e-3))
+
+    # optax.sgd training step - grads are real DiskArrays.
+    lr = 0.01
+    opt = optax.sgd(lr)
+    opt_state = opt.init(a)
+
+    grad_a = jax.grad(lambda a: jask.sum(a))(a)
+    updates, opt_state = opt.update(grad_a, opt_state)
+    # optax.apply_updates uses jnp.asarray internally; use `+` directly.
+    new_a = a + updates
+
+    result = np.asarray(new_a.to_memmap())
+    expected = A - lr * np.ones_like(A)
+    print("optax sgd step matches:", np.allclose(result, expected, atol=1e-4))
 
 
 if __name__ == "__main__":

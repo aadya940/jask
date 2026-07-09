@@ -1,4 +1,7 @@
 from ..base import BlockParallelOp, make_jax_op, get_default_policy, derive_page_shape
+from ..base.disk_array import DiskArray, DiskArrayType
+
+from jax.experimental.hijax import VJPHiPrimitive
 
 # Cache built (op, jax_op) pairs by the config that actually determines the
 # compiled function's shape, without this, dot() rebuilds Dot and re-JITs
@@ -68,3 +71,40 @@ def dot(a, b):
         op, jax_op = cached
 
     return jax_op(a, b)
+
+
+# HiJax version
+
+
+class HiDot(VJPHiPrimitive):
+    def __init__(self, x_aval: DiskArrayType, y_aval: DiskArrayType):
+        assert x_aval.shape[1] == y_aval.shape[0], "hi_dot: inner dim mismatch"
+        self.in_avals = (x_aval, y_aval)
+        self.out_aval = DiskArrayType(
+            shape=(x_aval.shape[0], y_aval.shape[1]),
+            dtype=x_aval.dtype,
+        )
+        self.params = {}
+        super().__init__()
+
+    def expand(self, x, y):
+        result = dot(x._to_blocked(), y._to_blocked())
+        return DiskArray._from_blocked(result)
+
+    def vjp_fwd(self, nzs_in, x, y):
+        return self(x, y), (x, y)
+
+    def vjp_bwd_retval(self, res, g):
+        # d(a @ b)/da = g @ b.T; d(a @ b)/db = a.T @ g
+        x, y = res
+        from .transpose import hi_transpose
+        return (hi_dot(g, hi_transpose(y)), hi_dot(hi_transpose(x), g))
+
+
+def hi_dot(x: DiskArray, y: DiskArray) -> DiskArray:
+    """Disk-backed matmul: x @ y."""
+    op = HiDot(
+        DiskArrayType(x.shape, x.dtype),
+        DiskArrayType(y.shape, y.dtype),
+    )
+    return op(x, y)

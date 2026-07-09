@@ -8,33 +8,21 @@ memory budget, since no equivalent paging mechanism exists across that
 boundary.
 
 This module defines:
-- `DiskArray`: a memmap-backed array partitioned into a grid of blocks.
-  Owns block addressing (slicing, edge-block handling) and the actual
-  disk reads/writes; callers address blocks purely by `block_idx`, never
-  by raw byte offset.
 - `IOCost`: a running tally of host-to-device transfers, used to reason
   about and benchmark the cost of a computation.
 - `Policy`: derives how many blocks can be held in flight at once from a
   user-specified device memory budget and available host memory, so that
   computation can safely use more than the bare minimum working set
   without ever exceeding either budget.
-- `SpillFile`: a `DiskArray` for ephemeral, computation-scoped data (e.g.
-  gradients or reduced intermediates written mid-algorithm) rather than a
-  user-supplied input/output array. Owns its own temp file and deletes it
-  on cleanup instead of persisting past the run.
+- Memory-budget helpers: `set_memory_budget`, `get_default_policy`,
+  `derive_page_shape`, `align_to_os_page`.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-import jax
-import jax.numpy as jnp
 import numpy as np
 
 import psutil
-import itertools
-import tempfile
-import os
-import mmap
 
 
 @dataclass
@@ -139,142 +127,3 @@ def derive_page_shape(policy: Policy, dtype: np.dtype, full_shape: tuple) -> tup
     ndim = len(full_shape)
     side = max(1, int(round(elements_per_page ** (1 / ndim))))
     return tuple(min(side, s) for s in full_shape)
-
-
-@dataclass(frozen=True)
-class DiskArray:
-    filename: str
-    full_shape: tuple
-    dtype: np.dtype
-    page_shape: tuple
-    # One tiny, real pytree leaf (content unused). Without at least one real
-    # leaf somewhere in a custom_vjp call's arguments, JAX's autodiff treats
-    # the whole call as having nothing to differentiate and silently skips
-    # invoking the backward rule entirely - confirmed empirically; every
-    # DiskArray needs this so gradients are actually computed regardless of
-    # which/how many arguments in a given op call are disk-backed.
-    _marker: jax.Array = field(default_factory=lambda: jnp.zeros(()), compare=False)
-
-    @classmethod
-    def create(cls, filename, full_shape, dtype, page_shape) -> "DiskArray":
-        np.memmap(filename, dtype=dtype, mode="w+", shape=full_shape)
-        return cls(filename, full_shape, dtype, page_shape)
-
-    def _mmap(self, mode="r"):
-        # Cached per-instance, not globally - a permanent global dict keyed
-        # by filename leaked memory badly (every file ever touched stayed
-        # fully resident for the rest of the process, causing real OOMs
-        # across multi-trial benchmarks). Within one algorithm call, the
-        # same DiskArray Python objects (inputs/out/grads) are reused for
-        # the whole loop, so this still gives the caching benefit - and it's
-        # freed automatically via garbage collection once the call finishes
-        # and local references drop, no manual eviction needed anywhere.
-        # object.__setattr__ bypasses frozen=True for this internal cache.
-        cached = self.__dict__.get("_mmap_obj")
-        if cached is None:
-            cached = np.memmap(
-                self.filename, dtype=self.dtype, mode="r+", shape=self.full_shape
-            )
-            try:
-                cached._mmap.madvise(mmap.MADV_HUGEPAGE)
-            except (AttributeError, OSError, ValueError):
-                pass  # not supported on this platform/kernel - non-fatal
-            object.__setattr__(self, "_mmap_obj", cached)
-        return cached
-
-    def to_jax(self) -> jax.Array:
-        """Explicitly materialize the whole array into device memory.
-
-        Only call this when the array is known to be small enough to fit -
-        it fully loads full_shape into RAM/device memory, defeating the
-        out-of-core guarantee if used on something too big. No automatic
-        or implicit path calls this; it exists as a deliberate escape hatch.
-        """
-        return jax.device_put(np.asarray(self._mmap(mode="r")))
-
-    @property
-    def grad(self) -> "DiskArray":
-        """DiskArray pointing at this array's gradient file (<filename>.grad).
-
-        f_bwd writes gradients as a side effect at <input_filename>.grad,
-        but returns the input handle itself as the cotangent placeholder
-        (JAX's custom_vjp requires the returned pytree structure to match
-        the primal input exactly, including meta fields like filename).
-        Use this to reach the real gradient data after jax.grad.
-        """
-        return DiskArray(
-            self.filename + ".grad", self.full_shape, self.dtype, self.page_shape
-        )
-
-    def block_grid(self):
-        return itertools.product(
-            *(
-                range(-(-s // p)) for s, p in zip(self.full_shape, self.page_shape)
-            )  # ceil div
-        )
-
-    def _slice_for(self, block_idx: tuple) -> tuple[slice, ...]:
-        return tuple(
-            slice(i * p, min((i + 1) * p, s))
-            for i, p, s in zip(block_idx, self.page_shape, self.full_shape)
-        )
-
-    def read_block(self, block_idx: tuple, io_cost: IOCost | None = None) -> np.ndarray:
-        arr = self._mmap(mode="r")
-        block = arr[self._slice_for(block_idx)]
-        if io_cost is not None:
-            io_cost.total_pages += 1
-        return block
-
-    def write_block(
-        self, block_idx: tuple, value: np.ndarray, io_cost: IOCost | None = None
-    ):
-        arr = self._mmap(mode="r+")
-        arr[self._slice_for(block_idx)] = value
-        if io_cost is not None:
-            io_cost.total_pages += 1
-
-    def is_edge_block(self, block_idx) -> bool:
-        return any(
-            s.stop - s.start != p
-            for s, p in zip(self._slice_for(block_idx), self.page_shape)
-        )
-
-
-jax.tree_util.register_dataclass(
-    DiskArray,
-    data_fields=["_marker"],
-    meta_fields=["filename", "full_shape", "dtype", "page_shape"],
-)
-
-
-@dataclass(frozen=True)
-class SpillFile(DiskArray):
-    """A DiskArray for ephemeral, computation-scoped data (grad buffers,
-    reduced intermediates), same block I/O as DiskArray, but owns its own
-    temp file and deletes it on cleanup instead of persisting past the run.
-    """
-
-    @classmethod
-    def create(cls, full_shape, dtype, page_shape) -> "SpillFile":
-        fd, path = tempfile.mkstemp(suffix=".spill")
-        os.close(fd)
-        np.memmap(path, dtype=dtype, mode="w+", shape=full_shape)
-        return cls(path, full_shape, dtype, page_shape)
-
-    def cleanup(self):
-        if os.path.exists(self.filename):
-            os.remove(self.filename)
-
-    def __enter__(self) -> "SpillFile":
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.cleanup()
-
-
-jax.tree_util.register_dataclass(
-    SpillFile,
-    data_fields=["_marker"],
-    meta_fields=["filename", "full_shape", "dtype", "page_shape"],
-)

@@ -1,5 +1,7 @@
 from ..base import BlockParallelOp, make_jax_op, get_default_policy
+from ..base.disk_array import DiskArray, DiskArrayType
 
+from jax.experimental.hijax import VJPHiPrimitive
 
 _ADD_OP_CACHE: dict[tuple, tuple] = {}
 
@@ -49,3 +51,36 @@ def add(a, b):
         op, jax_op = cached
 
     return jax_op(a, b)
+
+
+# HiJax Version
+
+
+class HiAdd(VJPHiPrimitive):
+    def __init__(self, x_aval: DiskArrayType, y_aval: DiskArrayType):
+        assert x_aval.shape == y_aval.shape, "hi_add: shape mismatch"
+        assert x_aval.dtype == y_aval.dtype, "hi_add: dtype mismatch"
+        self.in_avals = (x_aval, y_aval)
+        self.out_aval = x_aval
+        self.params = {}
+        super().__init__()
+
+    def expand(self, x, y):
+        result = add(x._to_blocked(), y._to_blocked())
+        return DiskArray._from_blocked(result)
+
+    def vjp_fwd(self, nzs_in, x, y):
+        return self(x, y), None
+
+    def vjp_bwd_retval(self, res, g):
+        # Both cotangents = incoming cotangent (identity gradient).
+        return (g, g)
+
+
+def hi_add(x: DiskArray, y: DiskArray) -> DiskArray:
+    """Disk-backed elementwise add."""
+    op = HiAdd(
+        DiskArrayType(x.shape, x.dtype),
+        DiskArrayType(y.shape, y.dtype),
+    )
+    return op(x, y)

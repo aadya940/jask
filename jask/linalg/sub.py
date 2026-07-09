@@ -1,4 +1,7 @@
 from ..base import BlockParallelOp, make_jax_op, get_default_policy
+from ..base.disk_array import DiskArray, DiskArrayType
+
+from jax.experimental.hijax import VJPHiPrimitive
 
 _SUB_OP_CACHE: dict[tuple, tuple] = {}
 
@@ -48,3 +51,36 @@ def sub(a, b):
         op, jax_op = cached
 
     return jax_op(a, b)
+
+
+# HiJax version
+
+
+class HiSub(VJPHiPrimitive):
+    def __init__(self, x_aval: DiskArrayType, y_aval: DiskArrayType):
+        assert x_aval.shape == y_aval.shape, "hi_sub: shape mismatch"
+        assert x_aval.dtype == y_aval.dtype, "hi_sub: dtype mismatch"
+        self.in_avals = (x_aval, y_aval)
+        self.out_aval = x_aval
+        self.params = {}
+        super().__init__()
+
+    def expand(self, x, y):
+        result = sub(x._to_blocked(), y._to_blocked())
+        return DiskArray._from_blocked(result)
+
+    def vjp_fwd(self, nzs_in, x, y):
+        return self(x, y), None
+
+    def vjp_bwd_retval(self, res, g):
+        # d(a - b)/da = 1, d(a - b)/db = -1
+        return (g, -1.0 * g)
+
+
+def hi_sub(x: DiskArray, y: DiskArray) -> DiskArray:
+    """Disk-backed elementwise subtraction."""
+    op = HiSub(
+        DiskArrayType(x.shape, x.dtype),
+        DiskArrayType(y.shape, y.dtype),
+    )
+    return op(x, y)

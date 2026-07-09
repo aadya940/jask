@@ -1,5 +1,6 @@
 from .base_ops import *
 from .base_page import *
+from .disk_array import *
 from .utils import _ReusingBlockReader
 
 from typing import Union
@@ -49,10 +50,10 @@ class OOCAlgorithm:
 
     def run_forward(
         self,
-        inputs: list[DiskArray],
+        inputs: list[BlockedArray],
         output_page_shape: tuple,
         output_filename: str | None = None,
-    ) -> DiskArray:
+    ) -> BlockedArray:
         """Compute the full disk-backed output, one block at a time."""
         if isinstance(self._op, CustomOp):
             return self._op.forward(self, *inputs)
@@ -68,21 +69,21 @@ class OOCAlgorithm:
 
     def _allocate_output(
         self,
-        inputs: list[DiskArray],
+        inputs: list[BlockedArray],
         output_page_shape: tuple,
         output_filename: str | None,
-    ) -> DiskArray:
-        """Create the (empty) output DiskArray at the op's declared shape."""
+    ) -> BlockedArray:
+        """Create the (empty) output BlockedArray at the op's declared shape."""
         out_shape = self._op.output_shape(*(a.full_shape for a in inputs))
         if output_filename is None:
             fd, output_filename = tempfile.mkstemp(suffix=".ooc")
             os.close(fd)
-        return DiskArray.create(
+        return BlockedArray.create(
             output_filename, out_shape, inputs[0].dtype, output_page_shape
         )
 
     def _compute_output_block(
-        self, inputs: list[DiskArray], out_idx: tuple, reader: _ReusingBlockReader
+        self, inputs: list[BlockedArray], out_idx: tuple, reader: _ReusingBlockReader
     ):
         """Load one output tile's contributing blocks and fold them into a result."""
         block_idx_groups = list(self._op.index_map(out_idx))  # K entries
@@ -105,8 +106,8 @@ class OOCAlgorithm:
 
     def run_backward(
         self,
-        inputs: list[DiskArray],
-        d_out: DiskArray,
+        inputs: list[BlockedArray],
+        d_out: BlockedArray,
         grad_handles: list[SpillFile] | None = None,
     ) -> tuple:
         """Compute and accumulate gradients for every input, one block at a time."""
@@ -122,7 +123,7 @@ class OOCAlgorithm:
         return tuple(grads)
 
     def _allocate_grads(
-        self, inputs: list[DiskArray], grad_handles: list[SpillFile] | None
+        self, inputs: list[BlockedArray], grad_handles: list[SpillFile] | None
     ) -> list[SpillFile]:
         """Create (or zero-init pre-decided) gradient SpillFiles, one per input."""
         if grad_handles is None:
@@ -137,9 +138,9 @@ class OOCAlgorithm:
 
     def _accumulate_grad_block(
         self,
-        inputs: list[DiskArray],
+        inputs: list[BlockedArray],
         grads: list[SpillFile],
-        d_out: DiskArray,
+        d_out: BlockedArray,
         out_idx: tuple,
         reader: _ReusingBlockReader,
     ):
@@ -183,12 +184,12 @@ def make_jax_op(
     algo = OOCAlgorithm(op, policy)
 
     @jax.custom_vjp
-    def f(*handles: DiskArray):
+    def f(*handles: BlockedArray):
         """Run the forward pass via a guaranteed-execution host callback."""
         out_shape = op.output_shape(*(h.full_shape for h in handles))
         fd, out_filename = tempfile.mkstemp(suffix=".ooc")
         os.close(fd)
-        out_handle = DiskArray(
+        out_handle = BlockedArray(
             out_filename, out_shape, handles[0].dtype, output_page_shape
         )
 
@@ -198,7 +199,7 @@ def make_jax_op(
             *handles,
         )
 
-    def f_fwd(*handles: DiskArray):
+    def f_fwd(*handles: BlockedArray):
         """Run forward, saving the input handles as backward's residuals."""
         return f(*handles), handles
 
@@ -217,7 +218,7 @@ def make_jax_op(
         # return the primal handles themselves as the placeholder cotangent
         # structure (trivially matches, since they *are* that structure).
         grad_handles = tuple(
-            DiskArray(h.filename + ".grad", h.full_shape, h.dtype, h.page_shape)
+            BlockedArray(h.filename + ".grad", h.full_shape, h.dtype, h.page_shape)
             for h in handles
         )
         # d_out's filename slot points at the value file (JAX's treedef
@@ -241,7 +242,7 @@ def make_jax_op(
 def gradient_of(handle: SpillFile) -> SpillFile:
     """After jax.grad, the returned handle is a placeholder (same identity as
     the primal input) - the real gradient lives at `<filename>.grad`. Use
-    this to get a DiskArray pointing at the actual gradient data.
+    this to get a BlockedArray pointing at the actual gradient data.
     """
     return SpillFile(
         handle.filename + ".grad", handle.full_shape, handle.dtype, handle.page_shape

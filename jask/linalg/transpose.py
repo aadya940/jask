@@ -1,5 +1,7 @@
 from ..base import BlockParallelOp, make_jax_op, get_default_policy
+from ..base.disk_array import DiskArray, DiskArrayType
 
+from jax.experimental.hijax import VJPHiPrimitive
 
 _TRANSPOSE_OP_CACHE: dict[tuple, tuple] = {}
 
@@ -51,3 +53,35 @@ def transpose(a):
         op, jax_op = cached
 
     return jax_op(a)
+
+
+# HiJax version
+
+
+class HiTranspose(VJPHiPrimitive):
+    def __init__(self, x_aval: DiskArrayType):
+        self.in_avals = (x_aval,)
+        self.out_aval = DiskArrayType(
+            shape=(x_aval.shape[1], x_aval.shape[0]),
+            dtype=x_aval.dtype,
+        )
+        self.params = {}
+        super().__init__()
+
+    def expand(self, x):
+        result = transpose(x._to_blocked())
+        return DiskArray._from_blocked(result)
+
+    def vjp_fwd(self, nzs_in, x):
+        return self(x), None
+
+    def vjp_bwd_retval(self, res, g):
+        # d(a.T)/da is transpose itself - transpose the cotangent back.
+        return (hi_transpose(g),)
+
+
+def hi_transpose(x: DiskArray) -> DiskArray:
+    """Disk-backed 2D transpose."""
+    assert len(x.shape) == 2, "hi_transpose: only 2D arrays supported"
+    op = HiTranspose(DiskArrayType(x.shape, x.dtype))
+    return op(x)

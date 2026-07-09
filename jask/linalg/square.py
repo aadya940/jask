@@ -1,4 +1,7 @@
 from ..base import BlockParallelOp, make_jax_op, get_default_policy
+from ..base.disk_array import DiskArray, DiskArrayType
+
+from jax.experimental.hijax import VJPHiPrimitive
 
 _SQUARE_OP_CACHE: dict[tuple, tuple] = {}
 
@@ -44,3 +47,31 @@ def square(a):
         op, jax_op = cached
 
     return jax_op(a)
+
+
+# HiJax version
+
+
+class HiSquare(VJPHiPrimitive):
+    def __init__(self, x_aval: DiskArrayType):
+        self.in_avals = (x_aval,)
+        self.out_aval = x_aval
+        self.params = {}
+        super().__init__()
+
+    def expand(self, x):
+        result = square(x._to_blocked())
+        return DiskArray._from_blocked(result)
+
+    def vjp_fwd(self, nzs_in, x):
+        return self(x), x
+
+    def vjp_bwd_retval(self, res, g):
+        # d(a**2)/da = 2*a
+        return (2.0 * res * g,)
+
+
+def hi_square(x: DiskArray) -> DiskArray:
+    """Disk-backed elementwise square."""
+    op = HiSquare(DiskArrayType(x.shape, x.dtype))
+    return op(x)
