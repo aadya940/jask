@@ -4,7 +4,7 @@ Jask
 </h1>
 
 <p align="center">
-<img src="logo.png" width="400px" height="400px" />
+<img src="logo.png" width="400px" height="400px" border="10px" />
 </p>
 
 Jask is a JAX compatible library for operations that are too large to fit in the RAM. It 
