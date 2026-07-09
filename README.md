@@ -1,13 +1,17 @@
 # jask
 
-Out-of-core, differentiable array computation for JAX.
-Your data is bigger than your GPU (or RAM); train on it anyway, using disk as extra memory, with correct gradients.
+Jask is a JAX compatible library for operations that are too large to fit in the RAM. It 
+provides algorithms for Out of Core computation with a JAX like API with support for JIT,
+`jax.grad` and `optax`, designed for deep integrations with a JAX machine learning pipeline.
 
-## What it is
+## Features
 
-- **Disk-backed arrays** partitioned into blocks, streamed through JAX one tile at a time.
-- **`jax.grad` support**, including chaining multiple disk-backed ops together in one loss function.
-- **Composable with `jax.jit`** - an op like `jask.dot(a, b)` behaves like `jnp.dot` from the outside.
+- Support for **Disk-backed arrays** partitioned into blocks, streamed through JAX one tile at a time.
+- **`jax.grad` support**, including chaining multiple disk-backed operations together in one loss function
+    and integrations to work alongside other JAX functions.
+- **Composable with `jax.jit`**, an op like `jask.dot(a, b)` behaves like `jnp.dot` from the outside.
+- Integrations with `optax` for easy gradient based weight updates
+- Easy to extend and add more Operations
 
 ## Quick start
 
@@ -39,6 +43,16 @@ dA = np.asarray(grad_a.grad.to_jax())
 ```
 
 See `example.py` for a full runnable demo.
+
+## Why not Dask?
+
+Dask is an excellent library for distributed and out-of-core array computation. Jask has a different goal: bringing out-of-core execution directly into the JAX programming model.
+
+While Dask can process arrays larger than memory, it is not a drop-in replacement for JAX arrays. Operations on Dask arrays do not automatically participate in JAX transformations such as jax.grad or jax.jit. Building differentiable out-of-core pipelines therefore requires additional integration work.
+
+Jask is designed so that disk-backed arrays behave as JAX values for the operations it supports. You can compose multiple disk-backed operations, differentiate them with jax.grad, and integrate them into Optax optimization loops without writing custom gradient rules in your own code.
+
+
 
 ## Currently supported ops
 

@@ -223,7 +223,7 @@ def make_jax_op(
         # d_out's filename slot points at the value file (JAX's treedef
         # match constraint); real cotangent data lives at <that>.grad,
         # written by the downstream op's f_bwd. Swap here before reading.
-        d_out_grad = DiskArray(
+        d_out_grad = SpillFile(
             d_out.filename + ".grad", d_out.full_shape, d_out.dtype, d_out.page_shape
         )
         io_callback(
@@ -238,11 +238,11 @@ def make_jax_op(
     return f
 
 
-def gradient_of(handle: DiskArray) -> DiskArray:
+def gradient_of(handle: SpillFile) -> SpillFile:
     """After jax.grad, the returned handle is a placeholder (same identity as
     the primal input) - the real gradient lives at `<filename>.grad`. Use
     this to get a DiskArray pointing at the actual gradient data.
     """
-    return DiskArray(
+    return SpillFile(
         handle.filename + ".grad", handle.full_shape, handle.dtype, handle.page_shape
     )
