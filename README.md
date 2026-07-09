@@ -1,7 +1,7 @@
 # jask
 
 Jask is a JAX compatible library for operations that are too large to fit in the RAM. It 
-provides algorithms for Out of Core computation with a JAX like API with support for JIT,
+provides algorithms for Out of Core computation with a JAX like API with support for `jax.jit`,
 `jax.grad` and `optax`, designed for deep integrations with a JAX machine learning pipeline.
 
 ## Features
