@@ -1,9 +1,5 @@
-from ..base import BlockParallelOp, make_jax_op, get_default_policy
-from ..base.disk_array import DiskArray, DiskArrayType
-
-from jax.experimental.hijax import VJPHiPrimitive
-
-_SQUARE_OP_CACHE: dict[tuple, tuple] = {}
+from ..base import BlockParallelOp
+from ..base.base_algo import make_op
 
 
 class Square(BlockParallelOp):
@@ -16,62 +12,13 @@ class Square(BlockParallelOp):
         return [(out_idx,)]
 
     def combine(self, acc, partial):
-        # Never called (single-entry index_map), but the ABC requires it.
         return acc + partial
 
     def backward_block(self, d_out_block, a_block):
-        # d(a**2)/da = 2*a
         return (2 * a_block * d_out_block,)
 
     def output_shape(self, a_shape):
         return a_shape
 
 
-def square(a):
-    """a**2 elementwise."""
-    policy = get_default_policy()
-    page_shape = a.page_shape
-
-    cache_key = (
-        page_shape,
-        policy.max_memory,
-        policy.page_size,
-        policy.pages_per_group,
-    )
-    cached = _SQUARE_OP_CACHE.get(cache_key)
-    if cached is None:
-        op = Square()
-        jax_op = make_jax_op(op, policy, page_shape)
-        _SQUARE_OP_CACHE[cache_key] = (op, jax_op)
-    else:
-        op, jax_op = cached
-
-    return jax_op(a)
-
-
-# HiJax version
-
-
-class HiSquare(VJPHiPrimitive):
-    def __init__(self, x_aval: DiskArrayType):
-        self.in_avals = (x_aval,)
-        self.out_aval = x_aval
-        self.params = {}
-        super().__init__()
-
-    def expand(self, x):
-        result = square(x._to_blocked())
-        return DiskArray._from_blocked(result)
-
-    def vjp_fwd(self, nzs_in, x):
-        return self(x), x
-
-    def vjp_bwd_retval(self, res, g):
-        # d(a**2)/da = 2*a
-        return (2.0 * res * g,)
-
-
-def hi_square(x: DiskArray) -> DiskArray:
-    """Disk-backed elementwise square."""
-    op = HiSquare(DiskArrayType(x.shape, x.dtype))
-    return op(x)
+square = make_op(Square)

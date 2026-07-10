@@ -26,8 +26,7 @@ from jax.experimental.hijax import HiType, register_hitype, ShapedArray
 
 from .base_page import IOCost
 
-
-#  public: DiskArray + HiType 
+#  public: DiskArray + HiType
 
 
 @dataclass
@@ -64,22 +63,19 @@ class DiskArray:
         return cls(ba.filename, ba.full_shape, ba.dtype)
 
     def __add__(self, other):
-        assert isinstance(other, DiskArray)
         from ..linalg import add as _add
-        return DiskArray._from_blocked(_add(self._to_blocked(), other._to_blocked()))
+
+        return _add(self, other)
 
     def __sub__(self, other):
-        assert isinstance(other, DiskArray)
         from ..linalg import sub as _sub
-        return DiskArray._from_blocked(_sub(self._to_blocked(), other._to_blocked()))
+
+        return _sub(self, other)
 
     def __mul__(self, other):
         from ..linalg import mul as _mul
-        if isinstance(other, DiskArray):
-            r = _mul(self._to_blocked(), other._to_blocked())
-        else:
-            r = _mul(self._to_blocked(), other)
-        return DiskArray._from_blocked(r)
+
+        return _mul(self, other)
 
     def __rmul__(self, other):
         return self.__mul__(other)
@@ -118,7 +114,7 @@ class DiskArrayType(HiType):
 register_hitype(DiskArray, lambda v: DiskArrayType(v.shape, v.dtype))
 
 
-#  internal: BlockedArray + SpillFile 
+#  internal: BlockedArray + SpillFile
 
 
 @dataclass(frozen=True)

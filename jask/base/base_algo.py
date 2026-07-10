@@ -10,6 +10,8 @@ import tempfile
 import numpy as np
 import jax
 from jax.experimental import io_callback
+from jax.experimental.hijax import VJPHiPrimitive
+from jax.core import ShapedArray
 
 
 class OOCAlgorithm:
@@ -247,3 +249,97 @@ def gradient_of(handle: SpillFile) -> SpillFile:
     return SpillFile(
         handle.filename + ".grad", handle.full_shape, handle.dtype, handle.page_shape
     )
+
+
+# make_op: auto-generate a public op from a BlockParallelOp class
+
+
+def make_op(op_class):
+    """Given a BlockParallelOp subclass, return the public function to call it.
+    Handles hijax registration, forward/backward wiring, DiskArray bridging.
+    Users write only the block-level math; this function does the rest.
+    """
+    from .base_page import get_default_policy, derive_page_shape
+    from .disk_array import DiskArray, DiskArrayType
+
+    def _run(inputs_blocked, op_impl, output_page_shape):
+        """Run the forward block loop directly, no custom_vjp/io_callback."""
+        policy = get_default_policy()
+        algo = OOCAlgorithm(op_impl, policy)
+        return algo.run_forward(inputs_blocked, output_page_shape)
+
+    def _run_backward(inputs_blocked, d_out_blocked, op_impl):
+        """Run the backward block loop directly."""
+        policy = get_default_policy()
+        algo = OOCAlgorithm(op_impl, policy)
+        return algo.run_backward(inputs_blocked, d_out_blocked)
+
+    class HiOpGenerated(VJPHiPrimitive):
+        def __init__(self, *input_avals, **op_kwargs):
+            """Store inputs and derive the output shape/dtype.
+            Extra kwargs (like axis=, axes=) get forwarded to op.from_inputs."""
+            self._op_kwargs = op_kwargs
+            self.in_avals = tuple(input_avals)
+            input_shapes = tuple(a.shape for a in input_avals)
+            dummy_shapes = [DummyBlocked(a.shape) for a in input_avals]
+            temp_op = op_class.from_inputs(*dummy_shapes, **op_kwargs)
+            out_shape = temp_op.output_shape(*input_shapes)
+            if out_shape == ():
+                self.out_aval = ShapedArray((), input_avals[0].dtype)
+                self._output_is_scalar = True
+            else:
+                self.out_aval = DiskArrayType(out_shape, input_avals[0].dtype)
+                self._output_is_scalar = False
+            self.params = {}
+            super().__init__()
+
+        def expand(self, *xs):
+            blockeds = [x._to_blocked() for x in xs]
+            op_impl = op_class.from_inputs(*blockeds, **self._op_kwargs)
+            out_shape = op_impl.output_shape(*(b.full_shape for b in blockeds))
+            policy = get_default_policy()
+            if out_shape == ():
+                out_page_shape = ()
+            else:
+                out_page_shape = derive_page_shape(policy, blockeds[0].dtype, out_shape)
+            result_ba = _run(blockeds, op_impl, out_page_shape)
+            if self._output_is_scalar:
+                return result_ba.to_jax()
+            return DiskArray._from_blocked(result_ba)
+
+        def vjp_fwd(self, nzs_in, *xs):
+            return self(*xs), xs
+
+        def vjp_bwd_retval(self, res, g):
+            inputs = res
+            blockeds = [x._to_blocked() for x in inputs]
+            op_impl = op_class.from_inputs(*blockeds, **self._op_kwargs)
+            if self._output_is_scalar:
+                shape = ()
+                fd, path = tempfile.mkstemp(suffix=".dat")
+                os.close(fd)
+                mm = np.memmap(path, dtype=blockeds[0].dtype, mode="w+", shape=shape)
+                mm[()] = float(g)
+                mm.flush()
+                d_out_ba = BlockedArray(path, shape, blockeds[0].dtype, ())
+            else:
+                d_out_ba = g._to_blocked()
+            grads = _run_backward(blockeds, d_out_ba, op_impl)
+            return tuple(DiskArray._from_blocked(gr) for gr in grads)
+
+    def public_fn(*args, **kwargs):
+        """User-facing entry point. kwargs (like axis=, axes=) get forwarded
+        to the op's from_inputs classmethod."""
+        input_types = tuple(DiskArrayType(a.shape, a.dtype) for a in args)
+        op = HiOpGenerated(*input_types, **kwargs)
+        return op(*args)
+
+    return public_fn
+
+
+class DummyBlocked:
+    """Placeholder shape holder for output_shape() calls at primitive-init time."""
+
+    def __init__(self, shape):
+        self.full_shape = shape
+        self.shape = shape

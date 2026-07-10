@@ -1,12 +1,12 @@
 from .base import set_memory_budget, Policy
-from .base.disk_array import DiskArray as DiskArray
+from .base.disk_array import DiskArray
 
-# Public API - hijax versions (jax.grad returns real gradients, no .grad hack).
-from .linalg.matmul import hi_dot as dot
-from .linalg.sum import hi_sum as sum
-from .linalg.sub import hi_sub as sub
-from .linalg.add import hi_add as add
-from .linalg.mul import hi_mul as mul
-from .linalg.square import hi_square as square
-from .linalg.transpose import hi_transpose as transpose
+# Public API - each op is auto-registered as a hijax primitive via make_op.
+from .linalg.matmul import dot
+from .linalg.sum import sum
+from .linalg.sub import sub
+from .linalg.add import add
+from .linalg.mul import mul
+from .linalg.square import square
+from .linalg.transpose import transpose
 from .linalg.materialize import hi_materialize as materialize

@@ -80,12 +80,39 @@ class BlockParallelOp(Op):
         """
         pass
 
+    @classmethod
+    def from_inputs(cls, *inputs):
+        """Build an op instance given the actual input BlockedArrays.
+        Default: no-arg construction. Override when the op needs shape-derived
+        params, e.g. Dot needs k_blocks."""
+        return cls()
+
 
 class CustomOp(Op):
-    """Ops that cannot easily be divided into Page/Frame based
-    subproblems. E.g: fft, softmax etc
+    """For ops that cannot be block-parallelised (e.g. fft, softmax, sort).
 
-    Needs a complete forward, backward pass and gradient implementation.
+    Instead of block-level methods, the user implements complete
+    forward/backward passes that get the OOCAlgorithm passed in as a
+    toolkit for block I/O, memory tracking, etc.
     """
 
-    pass
+    @abstractmethod
+    def forward(self, algo, *inputs):
+        """Run the full forward pass. Return a BlockedArray of the output."""
+        pass
+
+    @abstractmethod
+    def backward(self, algo, inputs, d_out):
+        """Run the full backward pass. Return a tuple of input gradients."""
+        pass
+
+    @abstractmethod
+    def output_shape(self, *input_shapes) -> tuple:
+        """Declare the output's shape given input shapes."""
+        pass
+
+    @classmethod
+    def from_inputs(cls, *inputs):
+        """Build an op instance given the actual input BlockedArrays.
+        Default: no-arg. Override if the op needs shape-derived config."""
+        return cls()
