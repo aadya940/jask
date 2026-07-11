@@ -87,31 +87,46 @@ class OOCAlgorithm:
     def _compute_output_block(
         self, inputs: list[BlockedArray], out_idx: tuple, reader: _ReusingBlockReader
     ):
-        """Load one output tile's contributing blocks and fold them into a result."""
+        """Load one output tile's contributing blocks and fold them into a
+        result - one k at a time, never pre-loading the whole K-sequence
+        (an op like Sum has K equal to every block in the input, so batching
+        the reads would defeat the memory budget entirely)."""
         block_idx_groups = list(self._op.index_map(out_idx))  # K entries
-
-        per_input_blocks = [
-            reader.read(pos, arr, tuple(idxs[pos] for idxs in block_idx_groups))
-            for pos, arr in enumerate(inputs)
-        ]
         self._policy.mark_loaded()
 
         acc = None
-        for k in range(len(block_idx_groups)):
-            partial = self._jit_forward_block(
-                *(blocks[k] for blocks in per_input_blocks)
-            )
+        for idxs in block_idx_groups:
+            blocks_k = [
+                reader.read_one(pos, arr, idxs[pos]) for pos, arr in enumerate(inputs)
+            ]
+            partial = self._jit_forward_block(*blocks_k)
             acc = partial if acc is None else self._op.combine(acc, partial)
+            # Force this iteration's computation to actually complete before
+            # moving on - JAX's dispatch is async by default, so without
+            # this, buffers from many iterations can queue up unexecuted
+            # (and unfreed) instead of being bounded to the current block.
+            jax.block_until_ready(acc)
 
         self._policy.mark_evicted()
         return acc
 
-    def run_backward(self, inputs: list[BlockedArray], d_out: BlockedArray) -> tuple:
-        """Compute and accumulate gradients for every input, one block at a time."""
+    def run_backward(
+        self,
+        inputs: list[BlockedArray],
+        d_out: BlockedArray,
+        target_paths: list[str] | None = None,
+    ) -> tuple:
+        """Compute and accumulate gradients for every input, one block at a
+        time. When target_paths is given (the BlockParallelOp path), each
+        gradient is written directly there - no separate scratch SpillFile
+        plus a full-array copy afterward. CustomOp keeps its existing
+        contract (returns wherever it put the result) since no CustomOp
+        currently exists to need target_paths support.
+        """
         if isinstance(self._op, CustomOp):
             return self._op.backward(self, inputs, d_out)
 
-        grads = self._allocate_grads(inputs)
+        grads = self._allocate_grads(inputs, target_paths)
         reader = _ReusingBlockReader(len(inputs), self._io_tracker)
 
         for out_idx in d_out.block_grid():
@@ -119,8 +134,16 @@ class OOCAlgorithm:
 
         return tuple(grads)
 
-    def _allocate_grads(self, inputs: list[BlockedArray]) -> list[SpillFile]:
-        """Create a fresh gradient SpillFile, one per input."""
+    def _allocate_grads(
+        self, inputs: list[BlockedArray], target_paths: list[str] | None
+    ) -> list[BlockedArray]:
+        """Create each gradient's BlockedArray - directly at its
+        deterministic target path when given, else a fresh SpillFile."""
+        if target_paths is not None:
+            return [
+                BlockedArray.create(path, a.full_shape, a.dtype, a.page_shape)
+                for a, path in zip(inputs, target_paths)
+            ]
         return [SpillFile.create(a.full_shape, a.dtype, a.page_shape) for a in inputs]
 
     def _accumulate_grad_block(
@@ -131,20 +154,18 @@ class OOCAlgorithm:
         out_idx: tuple,
         reader: _ReusingBlockReader,
     ):
-        """Compute one output tile's input gradients and accumulate them into grads."""
+        """Compute one output tile's input gradients and accumulate them into
+        grads - one k at a time, same reasoning as _compute_output_block."""
         d_out_block = jax.device_put(d_out.read_block(out_idx, self._io_tracker))
         block_idx_groups = list(self._op.index_map(out_idx))  # K entries
-
-        per_input_blocks = [
-            reader.read(pos, arr, tuple(idxs[pos] for idxs in block_idx_groups))
-            for pos, arr in enumerate(inputs)
-        ]
         self._policy.mark_loaded()
 
-        for k, idxs in enumerate(block_idx_groups):
-            grad_blocks = self._jit_backward_block(
-                d_out_block, *(blocks[k] for blocks in per_input_blocks)
-            )
+        for idxs in block_idx_groups:
+            blocks_k = [
+                reader.read_one(pos, arr, idxs[pos]) for pos, arr in enumerate(inputs)
+            ]
+            grad_blocks = self._jit_backward_block(d_out_block, *blocks_k)
+            jax.block_until_ready(grad_blocks)
             # Scatter-writes to K different grad-array locations - read-
             # modify-write, since a block may receive contributions from
             # multiple output tiles (e.g. matmul's dB_kj summed over i).
@@ -187,7 +208,6 @@ def make_op(op_class):
         _as_lo,
         _ensure_on_disk,
         _is_tracing,
-        _tiled_copy,
     )
 
     def _input_blocked(filename, shape, dtype):
@@ -247,12 +267,10 @@ def make_op(op_class):
                     d_out_ba = _ensure_on_disk(g)
                 policy = get_default_policy()
                 algo = OOCAlgorithm(op_impl, policy)
-                grads_ba = algo.run_backward(blockeds, d_out_ba)
-                outs = []
-                for x, gr, path in zip(xs, grads_ba, grad_paths):
-                    _tiled_copy(gr.filename, path, x.shape, x.dtype, gr.page_shape)
-                    outs.append(DiskArray(path, x.shape, x.dtype))
-                return tuple(outs)
+                grads_ba = algo.run_backward(blockeds, d_out_ba, grad_paths)
+                return tuple(
+                    DiskArray(path, x.shape, x.dtype) for x, path in zip(xs, grad_paths)
+                )
 
             filenames = [x.filename for x in xs]
             shapes = [ty.shape for ty in x_avals]
@@ -281,9 +299,7 @@ def make_op(op_class):
                     )
                 policy = get_default_policy()
                 algo = OOCAlgorithm(op_impl, policy)
-                grads_ba = algo.run_backward(blockeds, d_out_ba)
-                for gr, path in zip(grads_ba, grad_paths):
-                    _tiled_copy(gr.filename, path, gr.full_shape, dtype, gr.page_shape)
+                algo.run_backward(blockeds, d_out_ba, grad_paths)
                 return np.float32(0.0)
 
             io_args = [_as_lo(x) for x in xs] + [_as_lo(g)]

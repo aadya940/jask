@@ -94,10 +94,22 @@ def set_memory_budget(max_memory: int | str, pages_per_group: int = 3):
     """Set the process-wide default memory budget used by ops that don't
     receive an explicit Policy (e.g. jask.dot(a, b)). Call this once,
     not per-op-call.
+
+    `page_size` (the actual per-block size derive_page_shape uses) is
+    derived from max_memory here - nothing else in the block loop enforces
+    the budget (resident_pages/working_capacity are tracked but never
+    checked against), so page_size is the only real lever that controls
+    how much memory one block read actually costs. Dividing by
+    pages_per_group leaves headroom for more than one block resident at
+    once (previous cached block + current + op-internal scratch).
     """
     global _default_policy
+    max_memory_bytes = _parse_memory(max_memory)
+    page_size = align_to_os_page(max(OS_PAGE_SIZE, max_memory_bytes // pages_per_group))
     _default_policy = Policy(
-        max_memory=_parse_memory(max_memory), pages_per_group=pages_per_group
+        max_memory=max_memory_bytes,
+        pages_per_group=pages_per_group,
+        page_size=page_size,
     )
 
 

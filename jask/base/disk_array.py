@@ -249,7 +249,8 @@ class BlockedArray:
 
     def read_block(self, block_idx: tuple, io_cost: IOCost | None = None) -> np.ndarray:
         arr = self._mmap(mode="r")
-        block = arr[self._slice_for(block_idx)]
+        block = np.array(arr[self._slice_for(block_idx)])  # copy out before releasing
+        self._release_pages(arr)
         if io_cost is not None:
             io_cost.total_pages += 1
         return block
@@ -259,8 +260,28 @@ class BlockedArray:
     ):
         arr = self._mmap(mode="r+")
         arr[self._slice_for(block_idx)] = value
+        arr.flush()  # must persist dirty pages before advising them away
+        self._release_pages(arr)
         if io_cost is not None:
             io_cost.total_pages += 1
+
+    def _release_pages(self, arr):
+        """Proactively tell the OS this mmap's pages can be dropped now,
+        instead of waiting on passive reclaim under memory pressure - the
+        data is safely on disk (read_block already copied it out; write_block
+        just flushed it), so this never discards anything, only releases
+        pages the kernel would otherwise keep resident until it needs the
+        RAM for something else. Whole-mmap rather than per-block-byte-range:
+        page_shape often doesn't align to contiguous file bytes for N-D
+        blocks, and only one block is ever "current" at a time anyway
+        (_ReusingBlockReader caches at most one JAX-side copy, not a view
+        into this mmap), so there is nothing else in this mapping that
+        still needs to stay resident.
+        """
+        try:
+            arr._mmap.madvise(mmap.MADV_DONTNEED)
+        except (AttributeError, OSError, ValueError):
+            pass
 
 
 jax.tree_util.register_dataclass(

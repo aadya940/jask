@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 bench = ["dask[array]"]
+test = ["pytest", "pytest-memray", "optax"]
 
 [tool.setuptools.packages.find]
 include = ["jask*"]
