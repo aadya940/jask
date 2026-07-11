@@ -5,4 +5,4 @@ from .add import add, Add
 from .mul import mul, Mul, ScalarMul
 from .square import square, Square
 from .transpose import transpose, Transpose
-from .materialize import materialize
+from .materialize import hi_materialize as materialize

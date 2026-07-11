@@ -54,7 +54,7 @@ def main():
     A = np.random.rand(N, N).astype(np.float32)
     B = np.random.rand(N, N).astype(np.float32)
 
-    # --- jask ---
+    # jask
     a = make_array(A, page_shape)
     b = make_array(B, page_shape)
 
@@ -72,7 +72,7 @@ def main():
     os.remove(a.filename)
     os.remove(b.filename)
 
-    # --- dask, same chunk size as jask ---
+    # dask, same chunk size as jask
     da_a_warm = da.from_array(A, chunks=page_shape)
     da_b_warm = da.from_array(B, chunks=page_shape)
     _ = (da_a_warm @ da_b_warm)[0, 0].compute()
@@ -84,7 +84,7 @@ def main():
     result = (da_a @ da_b).compute()
     prof_dask.disable()
 
-    # --- dask, its own default chunk ---
+    # dask, its own default chunk
     _ = (da.from_array(A) @ da.from_array(B))[0, 0].compute()
 
     prof_dask_auto = cProfile.Profile()

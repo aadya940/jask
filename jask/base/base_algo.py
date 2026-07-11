@@ -106,17 +106,12 @@ class OOCAlgorithm:
         self._policy.mark_evicted()
         return acc
 
-    def run_backward(
-        self,
-        inputs: list[BlockedArray],
-        d_out: BlockedArray,
-        grad_handles: list[SpillFile] | None = None,
-    ) -> tuple:
+    def run_backward(self, inputs: list[BlockedArray], d_out: BlockedArray) -> tuple:
         """Compute and accumulate gradients for every input, one block at a time."""
         if isinstance(self._op, CustomOp):
             return self._op.backward(self, inputs, d_out)
 
-        grads = self._allocate_grads(inputs, grad_handles)
+        grads = self._allocate_grads(inputs)
         reader = _ReusingBlockReader(len(inputs), self._io_tracker)
 
         for out_idx in d_out.block_grid():
@@ -124,19 +119,9 @@ class OOCAlgorithm:
 
         return tuple(grads)
 
-    def _allocate_grads(
-        self, inputs: list[BlockedArray], grad_handles: list[SpillFile] | None
-    ) -> list[SpillFile]:
-        """Create (or zero-init pre-decided) gradient SpillFiles, one per input."""
-        if grad_handles is None:
-            return [
-                SpillFile.create(a.full_shape, a.dtype, a.page_shape) for a in inputs
-            ]
-        # Pre-decided filenames (e.g. from make_jax_op, so io_callback's
-        # declared and actual return structures match) - allocate them here.
-        for g in grad_handles:
-            np.memmap(g.filename, dtype=g.dtype, mode="w+", shape=g.full_shape)
-        return grad_handles
+    def _allocate_grads(self, inputs: list[BlockedArray]) -> list[SpillFile]:
+        """Create a fresh gradient SpillFile, one per input."""
+        return [SpillFile.create(a.full_shape, a.dtype, a.page_shape) for a in inputs]
 
     def _accumulate_grad_block(
         self,
@@ -172,85 +157,6 @@ class OOCAlgorithm:
         self._policy.mark_evicted()
 
 
-def make_jax_op(
-    op: Union[BlockParallelOp, CustomOp], policy: Policy, output_page_shape: tuple
-):
-    """Wraps an Op + Policy into a JAX-callable, differentiable function.
-
-    The returned function is safe to call inside a user's own jax.jit'd
-    training step: forward/backward run as io_callback (JIT-compatible,
-    guaranteed to execute on every real call, unlike pure_callback), with
-    the gradient rule supplied manually via custom_vjp since JAX cannot
-    trace through the disk-spanning block loop itself.
-    """
-    algo = OOCAlgorithm(op, policy)
-
-    @jax.custom_vjp
-    def f(*handles: BlockedArray):
-        """Run the forward pass via a guaranteed-execution host callback."""
-        out_shape = op.output_shape(*(h.full_shape for h in handles))
-        fd, out_filename = tempfile.mkstemp(suffix=".ooc")
-        os.close(fd)
-        out_handle = BlockedArray(
-            out_filename, out_shape, handles[0].dtype, output_page_shape
-        )
-
-        return io_callback(
-            lambda *hs: algo.run_forward(list(hs), output_page_shape, out_filename),
-            out_handle,  # zero-leaf static handle, not array data - see base_page's register_dataclass
-            *handles,
-        )
-
-    def f_fwd(*handles: BlockedArray):
-        """Run forward, saving the input handles as backward's residuals."""
-        return f(*handles), handles
-
-    def f_bwd(residuals, d_out):
-        """Compute gradients as a side effect, return placeholder cotangents."""
-        handles = residuals
-        # Real gradient goes to a deterministic path derived from each input's
-        # own filename - NOT a filename returned through JAX's cotangent
-        # machinery. Confirmed empirically: custom_vjp requires bwd's return
-        # to match the primal args' pytree structure *exactly* (including
-        # meta fields like filename), so any *new* filename either errors
-        # (strict match) or gets silently discarded in favor of the primal's
-        # own aux (loosened match) - there is no way to hand back a genuinely
-        # different filename through the return value itself. So: write the
-        # real gradient as a side effect at `<input filename>.grad`, and
-        # return the primal handles themselves as the placeholder cotangent
-        # structure (trivially matches, since they *are* that structure).
-        grad_handles = tuple(
-            BlockedArray(h.filename + ".grad", h.full_shape, h.dtype, h.page_shape)
-            for h in handles
-        )
-        # d_out's filename slot points at the value file (JAX's treedef
-        # match constraint); real cotangent data lives at <that>.grad,
-        # written by the downstream op's f_bwd. Swap here before reading.
-        d_out_grad = SpillFile(
-            d_out.filename + ".grad", d_out.full_shape, d_out.dtype, d_out.page_shape
-        )
-        io_callback(
-            lambda *args: algo.run_backward(list(args[:-1]), args[-1], grad_handles),
-            grad_handles,
-            *handles,
-            d_out_grad,
-        )
-        return handles
-
-    f.defvjp(f_fwd, f_bwd)
-    return f
-
-
-def gradient_of(handle: SpillFile) -> SpillFile:
-    """After jax.grad, the returned handle is a placeholder (same identity as
-    the primal input) - the real gradient lives at `<filename>.grad`. Use
-    this to get a BlockedArray pointing at the actual gradient data.
-    """
-    return SpillFile(
-        handle.filename + ".grad", handle.full_shape, handle.dtype, handle.page_shape
-    )
-
-
 # make_op: auto-generate a public op from a BlockParallelOp class
 
 
@@ -258,21 +164,140 @@ def make_op(op_class):
     """Given a BlockParallelOp subclass, return the public function to call it.
     Handles hijax registration, forward/backward wiring, DiskArray bridging.
     Users write only the block-level math; this function does the rest.
+
+    Under jax.jit, values flowing through XLA's traced graph are a TRIVIAL
+    marker (see DiskArrayType.lo_ty), not the real array - real data only
+    ever gets touched by OOCAlgorithm's tiled loop, run as an io_callback
+    side effect that writes straight to disk. A scalar op output (e.g. Sum)
+    is the one exception: tiny enough to flow as real data like any other
+    jax scalar.
+
+    HiPrimitive method bodies run once, abstractly, while JAX is still
+    building the jaxpr, so they can't touch concrete data directly - that's
+    why forward/backward computation always happens inside io_callback, and
+    why backward is its own primitive (HiOpBackward) that vjp_bwd_retval
+    only binds rather than executing inline.
+
+    A bare eager call (no jit, no grad) skips io_callback and stays lazy.
     """
     from .base_page import get_default_policy, derive_page_shape
-    from .disk_array import DiskArray, DiskArrayType
+    from .disk_array import (
+        DiskArray,
+        DiskArrayType,
+        _as_lo,
+        _ensure_on_disk,
+        _is_tracing,
+        _tiled_copy,
+    )
 
-    def _run(inputs_blocked, op_impl, output_page_shape):
-        """Run the forward block loop directly, no custom_vjp/io_callback."""
-        policy = get_default_policy()
-        algo = OOCAlgorithm(op_impl, policy)
-        return algo.run_forward(inputs_blocked, output_page_shape)
+    def _input_blocked(filename, shape, dtype):
+        """Block-addressable view of an input's existing file - never
+        writes, since the file already holds the correct data (the
+        DiskArray's lo_val is only ever a trivial marker, never real data)."""
+        page_shape = derive_page_shape(get_default_policy(), dtype, shape)
+        return BlockedArray(filename, shape, dtype, page_shape)
 
-    def _run_backward(inputs_blocked, d_out_blocked, op_impl):
-        """Run the backward block loop directly."""
-        policy = get_default_policy()
-        algo = OOCAlgorithm(op_impl, policy)
-        return algo.run_backward(inputs_blocked, d_out_blocked)
+    def _write_scalar(path, dtype, lo_val):
+        """Write a scalar cotangent value to its own file."""
+        mm = np.memmap(path, dtype=dtype, mode="w+", shape=())
+        mm[()] = np.asarray(lo_val)
+        mm.flush()
+        return BlockedArray(path, (), dtype, ())
+
+    class HiOpBackward(VJPHiPrimitive):
+        """Backward computation for one HiOpGenerated call, as its own
+        hi-primitive - see make_op's docstring.
+
+        Each output's file is `<input's own filename>.grad` - deterministic
+        (matches DiskArrayType.to_tangent_aval), not a fresh path per call,
+        so a jit-compiled loop feeding gradients back in via
+        DiskArray.update_ reuses one compiled executable.
+        """
+
+        def __init__(self, x_avals, g_ty, op_kwargs, g_is_scalar):
+            self.in_avals = (*x_avals, g_ty)
+            self.out_aval = tuple(ty.to_tangent_aval() for ty in x_avals)
+            self._x_avals = x_avals
+            self._g_ty = g_ty
+            self._g_is_scalar = g_is_scalar
+            self._op_kwargs = op_kwargs
+            self.params = {}
+            super().__init__()
+
+        def expand(self, *args):
+            *xs, g = args
+            x_avals = self._x_avals
+            dtype = x_avals[0].dtype
+            op_kwargs = self._op_kwargs
+            g_is_scalar = self._g_is_scalar
+            grad_paths = [ty.to_tangent_aval().filename for ty in x_avals]
+
+            if not _is_tracing(*[_as_lo(x) for x in xs], _as_lo(g)):
+                # Bare eager call - stay fully lazy, no io_callback needed.
+                blockeds = [_ensure_on_disk(x) for x in xs]
+                op_impl = op_class.from_inputs(*blockeds, **op_kwargs)
+                if g_is_scalar:
+                    fd, path = tempfile.mkstemp(suffix=".dat")
+                    os.close(fd)
+                    mm = np.memmap(path, dtype=dtype, mode="w+", shape=())
+                    mm[()] = float(g)
+                    mm.flush()
+                    d_out_ba = BlockedArray(path, (), dtype, ())
+                else:
+                    d_out_ba = _ensure_on_disk(g)
+                policy = get_default_policy()
+                algo = OOCAlgorithm(op_impl, policy)
+                grads_ba = algo.run_backward(blockeds, d_out_ba)
+                outs = []
+                for x, gr, path in zip(xs, grads_ba, grad_paths):
+                    _tiled_copy(gr.filename, path, x.shape, x.dtype, gr.page_shape)
+                    outs.append(DiskArray(path, x.shape, x.dtype))
+                return tuple(outs)
+
+            filenames = [x.filename for x in xs]
+            shapes = [ty.shape for ty in x_avals]
+
+            def run(*los):
+                # g's marker is always passed, even when its value is
+                # unused (non-scalar case, real data read from its
+                # filename instead) - needed so JAX sees the data
+                # dependency and runs this after whatever wrote g's file.
+                *xlos, g_lo = los
+                blockeds = [
+                    _input_blocked(f, s, dtype) for f, s in zip(filenames, shapes)
+                ]
+                op_impl = op_class.from_inputs(*blockeds, **op_kwargs)
+                out_shape = op_impl.output_shape(*(b.full_shape for b in blockeds))
+                if g_is_scalar:
+                    fd, g_path = tempfile.mkstemp(suffix=".dat")
+                    os.close(fd)
+                    d_out_ba = _write_scalar(g_path, dtype, g_lo)
+                else:
+                    # g's real data is already on disk (written when it was
+                    # produced) - just reference it, no write needed.
+                    g_page = derive_page_shape(get_default_policy(), dtype, out_shape)
+                    d_out_ba = BlockedArray(
+                        self._g_ty.filename, out_shape, dtype, g_page
+                    )
+                policy = get_default_policy()
+                algo = OOCAlgorithm(op_impl, policy)
+                grads_ba = algo.run_backward(blockeds, d_out_ba)
+                for gr, path in zip(grads_ba, grad_paths):
+                    _tiled_copy(gr.filename, path, gr.full_shape, dtype, gr.page_shape)
+                return np.float32(0.0)
+
+            io_args = [_as_lo(x) for x in xs] + [_as_lo(g)]
+            marker = io_callback(run, jax.ShapeDtypeStruct((), dtype), *io_args)
+
+            return tuple(
+                DiskArray(path, ty.shape, ty.dtype, _lo_tracer=marker)
+                for ty, path in zip(x_avals, grad_paths)
+            )
+
+        def vjp_fwd(self, nzs_in, *args):
+            raise NotImplementedError(
+                "second-order gradients are not supported for jask ops"
+            )
 
     class HiOpGenerated(VJPHiPrimitive):
         def __init__(self, *input_avals, **op_kwargs):
@@ -284,53 +309,101 @@ def make_op(op_class):
             dummy_shapes = [DummyBlocked(a.shape) for a in input_avals]
             temp_op = op_class.from_inputs(*dummy_shapes, **op_kwargs)
             out_shape = temp_op.output_shape(*input_shapes)
+            dtype = input_avals[0].dtype
+            self._dtype = dtype
+            self._out_shape = out_shape
             if out_shape == ():
-                self.out_aval = ShapedArray((), input_avals[0].dtype)
+                self.out_aval = ShapedArray((), dtype)
                 self._output_is_scalar = True
+                self._out_path = None
             else:
-                self.out_aval = DiskArrayType(out_shape, input_avals[0].dtype)
+                fd, out_path = tempfile.mkstemp(suffix=".dat")
+                os.close(fd)
+                self._out_path = out_path
+                self.out_aval = DiskArrayType(out_shape, dtype, out_path)
                 self._output_is_scalar = False
             self.params = {}
             super().__init__()
 
         def expand(self, *xs):
-            blockeds = [x._to_blocked() for x in xs]
-            op_impl = op_class.from_inputs(*blockeds, **self._op_kwargs)
-            out_shape = op_impl.output_shape(*(b.full_shape for b in blockeds))
-            policy = get_default_policy()
-            if out_shape == ():
-                out_page_shape = ()
-            else:
-                out_page_shape = derive_page_shape(policy, blockeds[0].dtype, out_shape)
-            result_ba = _run(blockeds, op_impl, out_page_shape)
-            if self._output_is_scalar:
-                return result_ba.to_jax()
-            return DiskArray._from_blocked(result_ba)
+            los = [_as_lo(x) for x in xs]
+            dtype = self._dtype
+            op_kwargs = self._op_kwargs
+            out_shape = self._out_shape
+            output_is_scalar = self._output_is_scalar
+            out_path = self._out_path
+
+            if not _is_tracing(*los):
+                # Bare eager call - stay fully lazy, no io_callback needed.
+                blockeds = [_ensure_on_disk(x) for x in xs]
+                op_impl = op_class.from_inputs(*blockeds, **op_kwargs)
+                out_page_shape = (
+                    ()
+                    if out_shape == ()
+                    else derive_page_shape(get_default_policy(), dtype, out_shape)
+                )
+                policy = get_default_policy()
+                algo = OOCAlgorithm(op_impl, policy)
+                result_ba = algo.run_forward(
+                    blockeds, out_page_shape, output_filename=out_path
+                )
+                if output_is_scalar:
+                    return result_ba.to_jax()
+                return DiskArray(out_path, out_shape, dtype)
+
+            filenames = [x.filename for x in xs]
+            shapes = [x.shape for x in xs]
+
+            def run(*los):
+                blockeds = [
+                    _input_blocked(f, s, dtype) for f, s in zip(filenames, shapes)
+                ]
+                op_impl = op_class.from_inputs(*blockeds, **op_kwargs)
+                out_page_shape = (
+                    ()
+                    if out_shape == ()
+                    else derive_page_shape(get_default_policy(), dtype, out_shape)
+                )
+                policy = get_default_policy()
+                algo = OOCAlgorithm(op_impl, policy)
+                result_ba = algo.run_forward(
+                    blockeds, out_page_shape, output_filename=out_path
+                )
+                if output_is_scalar:
+                    return np.asarray(result_ba.to_jax())
+                return np.float32(0.0)  # trivial marker - real data is on disk
+
+            # Both branches declare a scalar result: the real (tiny) value
+            # when output_is_scalar (out_shape is already () in that case),
+            # or a trivial marker otherwise.
+            result = io_callback(run, jax.ShapeDtypeStruct((), dtype), *los)
+
+            if output_is_scalar:
+                return result
+            return DiskArray(out_path, out_shape, dtype, _lo_tracer=result)
 
         def vjp_fwd(self, nzs_in, *xs):
             return self(*xs), xs
 
         def vjp_bwd_retval(self, res, g):
-            inputs = res
-            blockeds = [x._to_blocked() for x in inputs]
-            op_impl = op_class.from_inputs(*blockeds, **self._op_kwargs)
+            # Bind a SEPARATE hi-primitive instead of doing any concrete-data
+            # work here directly - see the jit-compatibility note on
+            # `make_op` above.
             if self._output_is_scalar:
-                shape = ()
-                fd, path = tempfile.mkstemp(suffix=".dat")
-                os.close(fd)
-                mm = np.memmap(path, dtype=blockeds[0].dtype, mode="w+", shape=shape)
-                mm[()] = float(g)
-                mm.flush()
-                d_out_ba = BlockedArray(path, shape, blockeds[0].dtype, ())
+                g_ty = ShapedArray((), self._dtype)
             else:
-                d_out_ba = g._to_blocked()
-            grads = _run_backward(blockeds, d_out_ba, op_impl)
-            return tuple(DiskArray._from_blocked(gr) for gr in grads)
+                g_ty = DiskArrayType(
+                    self._out_shape, self._dtype, self._out_path
+                ).to_tangent_aval()
+            backward_op = HiOpBackward(
+                self.in_avals, g_ty, self._op_kwargs, self._output_is_scalar
+            )
+            return backward_op(*res, g)
 
     def public_fn(*args, **kwargs):
         """User-facing entry point. kwargs (like axis=, axes=) get forwarded
         to the op's from_inputs classmethod."""
-        input_types = tuple(DiskArrayType(a.shape, a.dtype) for a in args)
+        input_types = tuple(DiskArrayType(a.shape, a.dtype, a.filename) for a in args)
         op = HiOpGenerated(*input_types, **kwargs)
         return op(*args)
 

@@ -22,7 +22,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import jax
 import jax.numpy as jnp
-from jax.experimental.hijax import HiType, register_hitype, ShapedArray
+from jax.experimental import io_callback
+from jax.experimental.hijax import HiType, VJPHiPrimitive, register_hitype, ShapedArray
 
 from .base_page import IOCost
 
@@ -31,11 +32,18 @@ from .base_page import IOCost
 
 @dataclass
 class DiskArray:
-    """Disk-backed array. Data lives in a memmap file at `filename`."""
+    """Disk-backed array. Data lives in a memmap file at `filename`.
+
+    `_lo_tracer` is set only transiently, by `DiskArrayType.raise_val` or a
+    HiPrimitive's own `expand`, and is always a TRIVIAL marker (never real
+    array data - see the zero-materialization notes on `DiskArrayType`
+    below). Real data always lives at `filename`. Not part of equality/repr.
+    """
 
     filename: str
     shape: tuple
     dtype: np.dtype
+    _lo_tracer: object = field(default=None, compare=False, repr=False)
 
     def to_memmap(self):
         return np.memmap(self.filename, dtype=self.dtype, mode="r+", shape=self.shape)
@@ -58,10 +66,6 @@ class DiskArray:
         page_shape = derive_page_shape(policy, self.dtype, self.shape)
         return BlockedArray(self.filename, self.shape, self.dtype, page_shape)
 
-    @classmethod
-    def _from_blocked(cls, ba: "BlockedArray") -> "DiskArray":
-        return cls(ba.filename, ba.full_shape, ba.dtype)
-
     def __add__(self, other):
         from ..linalg import add as _add
 
@@ -80,38 +84,116 @@ class DiskArray:
     def __rmul__(self, other):
         return self.__mul__(other)
 
+    def update_(self, new_value: "DiskArray") -> "DiskArray":
+        """Overwrite THIS array's own file in place with new_value's data,
+        tiled (never a full in-RAM copy). Returns self (same filename,
+        same identity).
+
+        This is the one explicit mechanism for loop-carried state
+        (parameters, optimizer buffers) under jax.jit: reassigning
+        `a = a + updates` gives `a` a FRESH filename every call, which
+        makes jax.jit retrace on every single step (a new filename is a
+        new DiskArrayType, a cache miss). `a = a.update_(a + updates)`
+        keeps `a`'s filename identical across calls, so jit compiles once
+        and reuses that executable for the rest of the loop.
+        """
+        return _update_op(self, new_value)
+
 
 @dataclass(frozen=True)
 class DiskArrayType(HiType):
-    """Tells JAX the shape/dtype of a DiskArray and how to lower/raise it."""
+    """Tells JAX the shape/dtype/filename of a DiskArray and how to
+    lower/raise it.
+
+    Under jax.jit, the value flowing through XLA's traced graph is a
+    trivial marker (`lo_ty` is always a scalar, regardless of the real
+    shape), not the real array. All real computation happens inside
+    jask's own tiled OOCAlgorithm block loops, run as an io_callback side
+    effect that writes straight to disk; the callback's return value is
+    just a dummy scalar for data-dependency ordering. `filename` has to be
+    part of the type (not just a value attribute) because `raise_val` only
+    ever receives that trivial marker, so it needs `self.filename` to
+    reconstruct the right DiskArray.
+
+    `raise_val` runs before JAX enters the trace context that owns the
+    incoming lo-level tracer, so it must never touch that tracer's value -
+    only bookkeeping is safe here.
+    """
 
     shape: tuple
     dtype: np.dtype
+    filename: str
 
     def lo_ty(self):
-        return [ShapedArray(self.shape, self.dtype)]
+        return [ShapedArray((), self.dtype)]
 
     def lower_val(self, val: DiskArray):
-        # Return the memmap directly - np.memmap is a subclass of ndarray,
-        # data stays on disk, only touched pages fault into RAM.
-        return [np.memmap(val.filename, dtype=val.dtype, mode="r", shape=val.shape)]
+        if val._lo_tracer is not None:
+            return [val._lo_tracer]
+        return [jnp.zeros((), dtype=self.dtype)]
 
-    def raise_val(self, arr):
-        # In practice, our HiPrimitives return DiskArray directly from
-        # expand() so raise_val is never called; kept for API completeness.
-        return DiskArray.from_numpy(np.asarray(arr))
+    def raise_val(self, marker):
+        return DiskArray(self.filename, self.shape, self.dtype, _lo_tracer=marker)
 
     def to_tangent_aval(self):
-        return self
+        # A DISTINCT but DETERMINISTIC (stable across repeat calls) location
+        # from the primal - allocating a fresh path here would violate
+        # jit's "same type => same compiled trace" requirement, since the
+        # cotangent's type must exactly match this declared tangent aval
+        # (filename included) on every call. Must also be IDEMPOTENT - JAX
+        # expects to_tangent_aval(to_tangent_aval(t)) == to_tangent_aval(t).
+        if self.filename.endswith(".grad"):
+            return self
+        return DiskArrayType(self.shape, self.dtype, self.filename + ".grad")
 
     def vspace_zero(self):
-        return DiskArray.from_numpy(np.zeros(self.shape, dtype=self.dtype))
+        # Used for an unused/zero-contribution cotangent branch within a
+        # trace, not fed back as an external input across calls - a fresh
+        # path is fine here (no retracing concern).
+        fd, path = tempfile.mkstemp(suffix=".dat")
+        os.close(fd)
+        marker = jnp.zeros((), dtype=self.dtype)
+        return DiskArray(path, self.shape, self.dtype, _lo_tracer=marker)
 
     def vspace_add(self, x, y):
-        return x + y
+        # Must compose through a real hi-primitive (jask's own `add`), not
+        # raw python/file arithmetic - `x`/`y` may still be abstract
+        # hi-tracers here (no concrete filename/data available yet).
+        from ..linalg import add as _add
+
+        return _add(x, y)
 
 
-register_hitype(DiskArray, lambda v: DiskArrayType(v.shape, v.dtype))
+register_hitype(DiskArray, lambda v: DiskArrayType(v.shape, v.dtype, v.filename))
+
+
+def _is_tracing(*vals):
+    return any(isinstance(v, jax.core.Tracer) for v in vals)
+
+
+def _as_lo(x):
+    """Resolve a DiskArray (or an as-yet-abstract hi-tracer of one) to the
+    TRIVIAL lo-level marker used purely for data-dependency ordering inside
+    io_callback - never real array data (real data always lives at a
+    statically-known `.filename`, read/written directly inside the
+    callback). Already-lo-level (non-DiskArray) values pass through as-is.
+    """
+    if not isinstance(x, DiskArray):
+        return x
+    return x._lo_tracer if x._lo_tracer is not None else jnp.zeros((), x.dtype)
+
+
+def _ensure_on_disk(x: DiskArray) -> "BlockedArray":
+    """Bridge a DiskArray to a BlockedArray for the bare-eager fast path
+    (no active JAX trace anywhere), which skips io_callback entirely.
+
+    `_lo_tracer` is always just a trivial marker, never real data - by the
+    time any Python code outside a jit call holds a DiskArray, its file is
+    already correct (jax.jit blocks until every io_callback, including the
+    one that wrote it, has completed). So this is a thin alias for
+    `_to_blocked()`.
+    """
+    return x._to_blocked()
 
 
 #  internal: BlockedArray + SpillFile
@@ -154,12 +236,6 @@ class BlockedArray:
     def to_jax(self) -> jax.Array:
         return jax.device_put(np.asarray(self._mmap(mode="r")))
 
-    @property
-    def grad(self) -> "BlockedArray":
-        return BlockedArray(
-            self.filename + ".grad", self.full_shape, self.dtype, self.page_shape
-        )
-
     def block_grid(self):
         return itertools.product(
             *(range(-(-s // p)) for s, p in zip(self.full_shape, self.page_shape))
@@ -186,12 +262,6 @@ class BlockedArray:
         if io_cost is not None:
             io_cost.total_pages += 1
 
-    def is_edge_block(self, block_idx) -> bool:
-        return any(
-            s.stop - s.start != p
-            for s, p in zip(self._slice_for(block_idx), self.page_shape)
-        )
-
 
 jax.tree_util.register_dataclass(
     BlockedArray,
@@ -200,9 +270,60 @@ jax.tree_util.register_dataclass(
 )
 
 
+def _tiled_copy(src_path, dst_path, shape, dtype, page_shape):
+    """Copy src -> dst one page at a time - never a full-array read/write."""
+    src = BlockedArray(src_path, shape, dtype, page_shape)
+    dst = BlockedArray.create(dst_path, shape, dtype, page_shape)
+    if shape == ():
+        dst.write_block((), np.asarray(src.read_block(())))
+        return
+    for idx in dst.block_grid():
+        dst.write_block(idx, np.asarray(src.read_block(idx)))
+
+
+class HiUpdate(VJPHiPrimitive):
+    """DiskArray.update_(new_value): overwrite self's own file in place,
+    tiled, returning a DiskArray with the SAME filename/identity - the
+    mechanism that lets a jax.jit-compiled loop reuse one executable
+    instead of retracing every step (see DiskArray.update_'s docstring)."""
+
+    def __init__(self, self_ty: DiskArrayType, new_ty: DiskArrayType):
+        self.in_avals = (self_ty, new_ty)
+        self.out_aval = self_ty
+        self.params = {}
+        self._self_filename = self_ty.filename
+        self._new_filename = new_ty.filename
+        self._shape, self._dtype = self_ty.shape, self_ty.dtype
+        super().__init__()
+
+    def expand(self, self_val, new_val):
+        from .base_page import get_default_policy, derive_page_shape
+
+        self_filename, new_filename = self._self_filename, self._new_filename
+        shape, dtype = self._shape, self._dtype
+        page_shape = derive_page_shape(get_default_policy(), dtype, shape)
+
+        def run(m1, m2):
+            _tiled_copy(new_filename, self_filename, shape, dtype, page_shape)
+            return np.float32(0.0)
+
+        marker = io_callback(
+            run, jax.ShapeDtypeStruct((), dtype), _as_lo(self_val), _as_lo(new_val)
+        )
+        return DiskArray(self_filename, shape, dtype, _lo_tracer=marker)
+
+
+def _update_op(self_arr: DiskArray, new_arr: DiskArray) -> DiskArray:
+    op = HiUpdate(
+        DiskArrayType(self_arr.shape, self_arr.dtype, self_arr.filename),
+        DiskArrayType(new_arr.shape, new_arr.dtype, new_arr.filename),
+    )
+    return op(self_arr, new_arr)
+
+
 @dataclass(frozen=True)
 class SpillFile(BlockedArray):
-    """Ephemeral BlockedArray - owns its own temp file, auto-deletes on cleanup."""
+    """BlockedArray backed by a fresh temp file - used for gradient buffers."""
 
     @classmethod
     def create(cls, full_shape, dtype, page_shape) -> "SpillFile":
@@ -210,16 +331,6 @@ class SpillFile(BlockedArray):
         os.close(fd)
         np.memmap(path, dtype=dtype, mode="w+", shape=full_shape)
         return cls(path, full_shape, dtype, page_shape)
-
-    def cleanup(self):
-        if os.path.exists(self.filename):
-            os.remove(self.filename)
-
-    def __enter__(self) -> "SpillFile":
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.cleanup()
 
 
 jax.tree_util.register_dataclass(

@@ -110,11 +110,15 @@ def main():
     page = 256
     n_trials = 5
 
-    print(f"page_shape=({page},{page}), {n_trials} trials per config, first jask "
-          f"call includes JIT compile time (as-used); steady-state excludes it.\n")
+    print(
+        f"page_shape=({page},{page}), {n_trials} trials per config, first jask "
+        f"call includes JIT compile time (as-used); steady-state excludes it.\n"
+    )
 
-    header = (f"{'N':>6} {'jask as-used':>16} {'jask steady-state':>20} "
-              f"{'dask (matched chunk)':>22} {'dask (auto chunk)':>20}")
+    header = (
+        f"{'N':>6} {'jask as-used':>16} {'jask steady-state':>20} "
+        f"{'dask (matched chunk)':>22} {'dask (auto chunk)':>20}"
+    )
     print(header)
 
     for N in sizes:
@@ -128,7 +132,12 @@ def main():
         t_dask_matched, r3 = bench_dask(A, B, (page, page), n_trials)
         t_dask_auto, r4 = bench_dask(A, B, "auto", n_trials)
 
-        for name, r in [("as-used", r1), ("steady", r2), ("dask-matched", r3), ("dask-auto", r4)]:
+        for name, r in [
+            ("as-used", r1),
+            ("steady", r2),
+            ("dask-matched", r3),
+            ("dask-auto", r4),
+        ]:
             ok = np.allclose(r, expected, atol=1e-1)
             if not ok:
                 print(f"  WARNING: {name} result incorrect at N={N}")
@@ -138,10 +147,14 @@ def main():
         m3, s3 = mean_std(t_dask_matched)
         m4, s4 = mean_std(t_dask_auto)
 
-        print(f"{N:>6} {m1:>7.3f}s±{s1:<6.3f} {m2:>11.3f}s±{s2:<6.3f} "
-              f"{m3:>13.3f}s±{s3:<6.3f} {m4:>11.3f}s±{s4:<6.3f}")
+        print(
+            f"{N:>6} {m1:>7.3f}s±{s1:<6.3f} {m2:>11.3f}s±{s2:<6.3f} "
+            f"{m3:>13.3f}s±{s3:<6.3f} {m4:>11.3f}s±{s4:<6.3f}"
+        )
 
-    print("\nRatios (>1 = jask slower) computed from the table above by hand if needed.")
+    print(
+        "\nRatios (>1 = jask slower) computed from the table above by hand if needed."
+    )
 
 
 if __name__ == "__main__":

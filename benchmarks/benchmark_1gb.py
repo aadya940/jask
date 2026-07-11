@@ -48,8 +48,10 @@ def main():
     policy = get_default_policy()
     page_shape = derive_page_shape(policy, np.float32, (N, N))
 
-    print(f"N={N} ({(N*N*4)/1024**3:.2f} GiB per array), jask-derived "
-          f"page_shape={page_shape} (from 4GB budget), {n_trials} trials\n")
+    print(
+        f"N={N} ({(N*N*4)/1024**3:.2f} GiB per array), jask-derived "
+        f"page_shape={page_shape} (from 4GB budget), {n_trials} trials\n"
+    )
 
     print("Generating input arrays (this itself takes a moment at 1GiB each)...")
     np.random.seed(0)
@@ -62,7 +64,7 @@ def main():
     check_n = 512
     expected_corner = A[:check_n] @ B[:, :check_n]
 
-    # --- jask, fully self-configured: no Policy/Dot/make_jax_op by hand ---
+    # jask, fully self-configured: no Policy/Dot/make_jax_op by hand
     jask_times = []
     for i in range(n_trials):
         a = make_array(A, page_shape)
@@ -77,7 +79,7 @@ def main():
         for f in (a.filename, b.filename, y.filename):
             os.remove(f)
 
-    # --- dask, chunk size matched to jask's derived page_shape ---
+    # dask, chunk size matched to jask's derived page_shape
     dask_matched_times = []
     for i in range(n_trials):
         da_a = da.from_array(A, chunks=page_shape)
@@ -86,9 +88,11 @@ def main():
         result = (da_a @ da_b)[:check_n, :check_n].compute()
         dask_matched_times.append(time.perf_counter() - t0)
         ok = np.allclose(result, expected_corner, atol=1e-1)
-        print(f"  dask (matched chunk) trial {i+1}: {dask_matched_times[-1]:.2f}s, correct={ok}")
+        print(
+            f"  dask (matched chunk) trial {i+1}: {dask_matched_times[-1]:.2f}s, correct={ok}"
+        )
 
-    # --- dask, auto chunk (its own 128MB-target heuristic) ---
+    # dask, auto chunk (its own 128MB-target heuristic)
     dask_auto_times = []
     da_a_auto = da.from_array(A, chunks="auto")
     print(f"  dask auto chunk size chosen: {da_a_auto.chunksize}")
@@ -99,7 +103,9 @@ def main():
         result = (da_a @ da_b)[:check_n, :check_n].compute()
         dask_auto_times.append(time.perf_counter() - t0)
         ok = np.allclose(result, expected_corner, atol=1e-1)
-        print(f"  dask (auto chunk) trial {i+1}: {dask_auto_times[-1]:.2f}s, correct={ok}")
+        print(
+            f"  dask (auto chunk) trial {i+1}: {dask_auto_times[-1]:.2f}s, correct={ok}"
+        )
 
     print()
     m1, s1 = mean_std(jask_times)

@@ -21,10 +21,9 @@ class BlockParallelOp(Op):
     def forward_block(self, *input_blocks: jax.Array) -> jax.Array:
         """Complete In-Memory Operation.
 
-        Examples
-        --------
-        def forward_block(self, block_1, block_2):
-            return block_1 @ block_2
+        Example:
+            def forward_block(self, block_1, block_2):
+                return block_1 @ block_2
         """
         pass
 
@@ -33,11 +32,10 @@ class BlockParallelOp(Op):
         """Given an Output Block, which Input coordinates does it need and
         how many calls to foward pass.
 
-        Examples
-        --------
-        def index_map(out_idx):
-            i, j = out_idx
-            return [((i, k), (k, j)) for k in range(self.k_blocks)]
+        Example:
+            def index_map(out_idx):
+                i, j = out_idx
+                return [((i, k), (k, j)) for k in range(self.k_blocks)]
         """
         pass
 
@@ -49,10 +47,9 @@ class BlockParallelOp(Op):
         accumulator and one partial resident at a time, instead of holding
         every partial for an output block simultaneously.
 
-        Examples
-        --------
-        def combine(self, acc, partial):
-            return acc + partial
+        Example:
+            def combine(self, acc, partial):
+                return acc + partial
         """
         pass
 
@@ -60,12 +57,11 @@ class BlockParallelOp(Op):
     def backward_block(self, d_out_block, *input_blocks) -> tuple[jax.Array]:
         """Defines VJP gradient for JAX reverse mode autodiff compatibility.
 
-        Examples
-        --------
-        def backward_block(self, d_out_block, block_1, block_2):
-            dA = d_out_block @ block_2.T
-            dB = block_1.T @ d_out_block
-            return (dA, dB)
+        Example:
+            def backward_block(self, d_out_block, block_1, block_2):
+                dA = d_out_block @ block_2.T
+                dB = block_1.T @ d_out_block
+                return (dA, dB)
         """
         pass
 
@@ -73,10 +69,9 @@ class BlockParallelOp(Op):
     def output_shape(self, *input_shapes) -> tuple:
         """Defines Output Shape.
 
-        Examples
-        --------
-        def output_shape(self, block_1, block_2):
-            return (block_1.shape[0], block_2.shape[1])
+        Example:
+            def output_shape(self, block_1, block_2):
+                return (block_1.shape[0], block_2.shape[1])
         """
         pass
 

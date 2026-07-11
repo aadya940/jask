@@ -66,14 +66,6 @@ class Policy:
     def working_capacity(self) -> int:
         return min(self.device_capacity, self.host_capacity)
 
-    @property
-    def prefetch_depth(self) -> int:
-        return max(1, self.working_capacity)
-
-    @property
-    def is_full(self) -> bool:
-        return self.resident_pages >= self.device_capacity
-
     def mark_loaded(self):
         self.resident_pages += 1
 

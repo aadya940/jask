@@ -14,35 +14,39 @@ import jax
 import jax.numpy as jnp
 from dataclasses import dataclass, field
 
+# A DiskArray-shaped pytree: metadata + one tiny "marker" leaf
 
-# --- A DiskArray-shaped pytree: metadata + one tiny "marker" leaf ---
 
 @dataclass(frozen=True)
 class Handle:
     filename: str
     marker: jax.Array = field(default_factory=lambda: jnp.zeros(()))
 
+
 jax.tree_util.register_dataclass(
     Handle,
-    data_fields=["marker"],   # the ONE real leaf JAX will differentiate through
-    meta_fields=["filename"], # everything else is static
+    data_fields=["marker"],  # the ONE real leaf JAX will differentiate through
+    meta_fields=["filename"],  # everything else is static
 )
 
 
-# --- Simulate a disk-backed op via custom_vjp. ---
+# Simulate a disk-backed op via custom_vjp.
 # In real jask, forward writes to a file; here we just print, and store the
 # "gradient" in a global dict (side-effect equivalent of writing to disk).
 
-grad_disk = {}   # filename -> the "gradient" that got written to disk
+grad_disk = {}  # filename -> the "gradient" that got written to disk
 
 
 def _op_impl(name: str, x: Handle) -> Handle:
     return Handle(filename=f"out_{name}", marker=x.marker * 2.0)
 
+
 _op = jax.custom_vjp(_op_impl, nondiff_argnums=(0,))
+
 
 def _op_fwd(name: str, x: Handle):
     return _op(name, x), (x,)
+
 
 def _op_bwd(name: str, residuals, g: Handle):
     (x,) = residuals
@@ -52,18 +56,22 @@ def _op_bwd(name: str, residuals, g: Handle):
     print(f"[bwd of {name}] wrote grad for {x.filename}: {computed_input_grad}")
     return (Handle(filename=x.filename, marker=computed_input_grad),)
 
+
 _op.defvjp(_op_fwd, _op_bwd)
+
 
 def op(x: Handle, name: str) -> Handle:
     return _op(name, x)
 
 
-# --- The actual test: chain op1 -> op2, then jax.grad ---
+# The actual test: chain op1 -> op2, then jax.grad
+
 
 def loss_fn(a: Handle) -> jax.Array:
-    y = op(a, "op1")         # first disk-backed op
-    z = op(y, "op2")         # second - feeds output of op1 as its input
-    return z.marker          # something scalar for grad to work
+    y = op(a, "op1")  # first disk-backed op
+    z = op(y, "op2")  # second - feeds output of op1 as its input
+    return z.marker  # something scalar for grad to work
+
 
 a = Handle(filename="a", marker=jnp.array(1.0))
 

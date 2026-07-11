@@ -27,8 +27,13 @@ class Transpose(BlockParallelOp):
         return acc + partial
 
     def backward_block(self, d_out_block, a_block):
-        # d(transpose)/d = inverse transpose
-        return (jnp.transpose(d_out_block, self.axes),)
+        # d(transpose)/d = inverse permutation applied to the cotangent.
+        if self.axes is None:
+            inv = None  # full-reverse is self-inverse
+        else:
+            n = len(self.axes)
+            inv = tuple(sorted(range(n), key=lambda i: self.axes[i]))
+        return (jnp.transpose(d_out_block, inv),)
 
     def output_shape(self, a_shape):
         if self.axes is None:

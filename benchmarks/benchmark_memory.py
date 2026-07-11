@@ -15,7 +15,7 @@ Run with: conda activate scipy-dev && python benchmark_memory.py
 import subprocess
 import sys
 
-_WORKER = r'''
+_WORKER = r"""
 import os, sys, resource, tempfile
 import numpy as np
 import jask
@@ -56,22 +56,27 @@ for f in (a.filename, b.filename, y.filename):
 
 delta_mb = rss_after - rss_before
 print(f"{n} {rss_after:.1f} {delta_mb:.1f} {ok}")
-'''
+"""
 
 
 def main():
-    print(f"{'N':>6} {'peak RSS (MB)':>15} {'delta over dot() (MB)':>22} {'array bytes (MB)':>18} {'correct':>8}")
+    print(
+        f"{'N':>6} {'peak RSS (MB)':>15} {'delta over dot() (MB)':>22} {'array bytes (MB)':>18} {'correct':>8}"
+    )
     for n in (128, 256, 512, 1024, 2048, 4096):
         result = subprocess.run(
             [sys.executable, "-c", _WORKER, str(n)],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
             print(f"{n:>6}  FAILED: {result.stderr.strip()[-300:]}")
             continue
         n_out, rss, delta, ok = result.stdout.strip().split()
         array_mb = (int(n_out) ** 2 * 4) / (1024 * 1024)
-        print(f"{n_out:>6} {float(rss):>15.1f} {float(delta):>22.1f} {array_mb:>18.1f} {ok:>8}")
+        print(
+            f"{n_out:>6} {float(rss):>15.1f} {float(delta):>22.1f} {array_mb:>18.1f} {ok:>8}"
+        )
 
 
 if __name__ == "__main__":
