@@ -6,32 +6,58 @@ Jask
 <img src="logo.png" width="400px" height="400px" border="10px" />
 </p>
 
-Jask is a JAX-compatible library for operations on arrays too large to fit in RAM.
-It provides out-of-core algorithms with a JAX-native API - `jax.jit`, `jax.grad`,
-and `optax` work directly on disk-backed arrays, no wrappers or placeholder gradients.
+<p align="center">
+Extremely lightweight, disk-backed arrays that behave like native JAX values!
+</p>
 
-This lets you run machine learning training or inference pipelines with weights or
-data that don't fit in memory, using disk as extra space, while staying inside
-ordinary JAX code.
+* Full JAX integration: `jax.jit`, `jax.grad`, and both composed, in either order.
+* Zero-materialization: XLA's traced graph never carries a full array, even under `jit`.
+* `optax` works transparently - `DiskArray` is a registered pytree leaf.
 
-## Features
+Train on data or weights that don't fit in RAM, without leaving ordinary JAX code!
 
-- **Disk-backed arrays** (`DiskArray`), partitioned into blocks and streamed through
-  JAX's tiled block loop one page at a time.
-- **Never materializes a full array**, even under `jax.jit`. XLA's traced graph only
-  ever carries a trivial marker; every real read/write happens as a side effect of
-  jask's own tiled loop.
-- **`jax.grad` support**: chain multiple disk-backed operations in a single loss
-  function. Gradients come back as real `DiskArray`s, not placeholder handles.
-- **`jax.jit` and `jax.grad` compose**, in either order, on the same op. A jitted
-  training step that differentiates through disk-backed ops just works.
-- **`optax` integration** - `optax.sgd`, `optax.adam`, and any other optimizer work
-  transparently, since `DiskArray` registers as an atomic pytree leaf.
-- **`DiskArray.update_()`** lets a training loop reuse one compiled `jax.jit`
-  executable across every step, instead of retracing every call.
-- Easy to extend: new ops are a handful of block-level methods, see below.
+* ✅ Real `jax.grad` gradients, returned as actual `DiskArray`s - never placeholder handles
+* ✅ `jax.jit` and `jax.grad` compose in either order on the same op
+* ✅ Never materializes a full array in RAM, even under `jit` - verified with `memray`
+* ✅ `optax.sgd`, `optax.adam`, and any other optimizer work out of the box
+* ✅ `DiskArray.update_()` lets a jitted training loop compile once, not retrace every step
+* ✅ Adding an op is a handful of block-level methods - no hijax/JAX-internals boilerplate
+* ✅ Single machine, one process, by design - pair with native `pmap`/`shard_map` for multi-device
 
-## Quick start
+## Get started!
+
+* Read [log.md](log.md) for what's tested and working versus known gaps
+* Open a PR if you want an op supported - see [Currently supported ops](#currently-supported-ops)
+
+## Table of contents
+
+* [Installation](#installation)
+* [Usage](#usage)
+* [Example](#example)
+* [Scope: single machine, one process](#scope-single-machine-one-process)
+* [Why not Dask?](#why-not-dask)
+* [Currently supported ops](#currently-supported-ops)
+* [Known limitations](#known-limitations)
+
+## Installation
+
+Not yet published to PyPI - install from a local clone:
+
+```
+git clone <this-repo>
+cd jask
+pip install -e .
+```
+
+## Usage
+
+There are three steps to a jask training/inference pipeline:
+
+1. Wrap your data with `jask.DiskArray` - either pointing at an existing memmap file on disk, or via `jask.DiskArray.from_numpy(arr)` for quick experiments.
+2. Compose ops (`jask.dot`, `jask.add`, `jask.sub`, `jask.mul`, `jask.square`, `jask.sum`, `jask.transpose`) into a loss function, exactly like you would with `jnp`.
+3. Use `jax.grad`, `jax.jit`, and `optax` directly - no wrappers, no placeholder gradients, no custom autodiff plumbing.
+
+## Example
 
 ```python
 import numpy as np
@@ -39,39 +65,44 @@ import jax
 import optax
 import jask
 
-jask.set_memory_budget("4GB")
+jask.set_memory_budget("1GB")
+np.random.seed(0)
 
-# Point at existing memmap files on disk - no data is loaded yet.
-a = jask.DiskArray("weights_a.dat", shape=(50000, 10000), dtype=np.float32)
-b = jask.DiskArray("weights_b.dat", shape=(10000, 5000), dtype=np.float32)
-c = jask.DiskArray("weights_c.dat", shape=(5000, 100), dtype=np.float32)
-target = jask.DiskArray("target.dat", shape=(50000, 100), dtype=np.float32)
+A = np.random.rand(4, 6).astype(np.float32)
+B = np.random.rand(6, 4).astype(np.float32)
+C = np.random.rand(4, 3).astype(np.float32)
+T = np.random.rand(4, 3).astype(np.float32)
+a, b, c, target = (jask.DiskArray.from_numpy(x) for x in (A, B, C, T))
 
-# Chain disk-backed ops into a scalar loss and differentiate with jax.grad.
-# jax.jit works here too, in either order: jax.jit(jax.grad(mse_loss)) or
-# jax.grad(jax.jit(mse_loss)) both produce correct, disk-backed gradients.
 def mse_loss(a, b, c, target):
     z = jask.dot(jask.dot(a, b), c)
     diff = jask.sub(z, target)
-    sq = jask.square(diff)
-    return jask.sum(sq)  # returns a real scalar jax.Array
+    return jask.sum(jask.square(diff))
 
+# jax.jit and jax.grad compose directly on disk-backed ops.
 grad_fn = jax.jit(jax.grad(mse_loss, argnums=(0, 1, 2)))
-grad_a, grad_b, grad_c = grad_fn(a, b, c, target)
-
-# optax works out of the box - gradients are DiskArrays.
-opt = optax.sgd(0.01)
+opt = optax.sgd(0.001)
 opt_state = opt.init(a)
-updates, opt_state = opt.update(grad_a, opt_state)
 
-# Use update_() (not `a = a + updates`) inside a jitted training loop: it
-# overwrites a's own file in place, so the compiled step reuses one
-# executable across every iteration instead of retracing each time.
-a = a.update_(a + updates)
+for step in range(5):
+    loss = float(mse_loss(a, b, c, target))
+    print(f"step {step}: loss = {loss:.4f}")
+    grad_a, grad_b, grad_c = grad_fn(a, b, c, target)
+    updates, opt_state = opt.update(grad_a, opt_state)
+    # update_() overwrites a's own file in place, so grad_fn stays compiled
+    # once instead of retracing every step.
+    a = a.update_(a + updates)
 ```
 
-For quick experiments with small arrays that fit in memory, `jask.DiskArray.from_numpy(arr)`
-writes a numpy array to a temp file and wraps it. See `example.py` for a full training loop.
+```
+step 0: loss = 80.9999
+step 1: loss = 77.2756
+step 2: loss = 73.7257
+step 3: loss = 70.3418
+step 4: loss = 67.1164
+```
+
+See [example.py](example.py) for the full version, including a manual gradient-correctness check against numpy.
 
 ## Scope: single machine, one process
 

@@ -17,6 +17,7 @@ import tempfile
 import os
 import mmap
 import itertools
+import weakref
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -26,6 +27,41 @@ from jax.experimental import io_callback
 from jax.experimental.hijax import HiType, VJPHiPrimitive, register_hitype, ShapedArray
 
 from .base_page import IOCost
+
+def _safe_remove(path):
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
+# path -> its active weakref.finalize, so update_() can cancel one when a
+# file's identity outlives the single object that first owned it (see
+# _adopt_as_persistent below).
+_active_finalizers: dict = {}
+
+
+def _own_fresh_file(disk_array: "DiskArray") -> "DiskArray":
+    """Call only at genuine new-file construction sites (from_numpy, an
+    op's fresh output, vspace_zero) - never on a re-wrap of an existing
+    file (raise_val, deterministic .grad paths, update_'s stable slot).
+    Deletes the file once THIS instance is unreachable, not any later
+    wrapper pointing at the same filename.
+    """
+    path = disk_array.filename
+    _active_finalizers[path] = weakref.finalize(disk_array, _safe_remove, path)
+    return disk_array
+
+
+def _adopt_as_persistent(path: str) -> None:
+    """Cancel path's finalizer, if any - its identity now persists across
+    reassignment (e.g. `a = a.update_(...)`), so it must not be deleted
+    just because the one Python object that first created it got GC'd.
+    """
+    finalizer = _active_finalizers.pop(path, None)
+    if finalizer is not None:
+        finalizer.detach()
+
 
 #  public: DiskArray + HiType
 
@@ -55,7 +91,7 @@ class DiskArray:
         mm = np.memmap(path, dtype=arr.dtype, mode="w+", shape=arr.shape)
         mm[:] = arr
         mm.flush()
-        return cls(path, arr.shape, arr.dtype)
+        return _own_fresh_file(cls(path, arr.shape, arr.dtype))
 
     def _to_blocked(self) -> "BlockedArray":
         """Bridge to BlockedArray so ops can reuse the existing OOCAlgorithm
@@ -153,7 +189,7 @@ class DiskArrayType(HiType):
         fd, path = tempfile.mkstemp(suffix=".dat")
         os.close(fd)
         marker = jnp.zeros((), dtype=self.dtype)
-        return DiskArray(path, self.shape, self.dtype, _lo_tracer=marker)
+        return _own_fresh_file(DiskArray(path, self.shape, self.dtype, _lo_tracer=marker))
 
     def vspace_add(self, x, y):
         # Must compose through a real hi-primitive (jask's own `add`), not
@@ -315,6 +351,11 @@ class HiUpdate(VJPHiPrimitive):
         self._self_filename = self_ty.filename
         self._new_filename = new_ty.filename
         self._shape, self._dtype = self_ty.shape, self_ty.dtype
+        # self_filename's identity now persists across reassignment
+        # (`a = a.update_(...)`) - the object that first created it (e.g.
+        # from_numpy) is about to become unreachable and get GC'd, but the
+        # file must outlive it.
+        _adopt_as_persistent(self_ty.filename)
         super().__init__()
 
     def expand(self, self_val, new_val):

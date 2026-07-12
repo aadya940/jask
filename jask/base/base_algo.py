@@ -208,6 +208,7 @@ def make_op(op_class):
         _as_lo,
         _ensure_on_disk,
         _is_tracing,
+        _own_fresh_file,
     )
 
     def _input_blocked(filename, shape, dtype):
@@ -365,7 +366,7 @@ def make_op(op_class):
                 )
                 if output_is_scalar:
                     return result_ba.to_jax()
-                return DiskArray(out_path, out_shape, dtype)
+                return _own_fresh_file(DiskArray(out_path, out_shape, dtype))
 
             filenames = [x.filename for x in xs]
             shapes = [x.shape for x in xs]
@@ -396,6 +397,11 @@ def make_op(op_class):
 
             if output_is_scalar:
                 return result
+            # No _own_fresh_file here - this instance is intermediate.
+            # raise_val reconstructs another wrapper around out_path when
+            # the value crosses back out of the jit boundary; finalizing
+            # this one would delete out_path while that later wrapper is
+            # still in use, same bug as a naive __del__ on the class.
             return DiskArray(out_path, out_shape, dtype, _lo_tracer=result)
 
         def vjp_fwd(self, nzs_in, *xs):
