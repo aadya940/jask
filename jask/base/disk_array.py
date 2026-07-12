@@ -28,6 +28,7 @@ from jax.experimental.hijax import HiType, VJPHiPrimitive, register_hitype, Shap
 
 from .base_page import IOCost
 
+
 def _safe_remove(path):
     try:
         os.remove(path)
@@ -120,6 +121,11 @@ class DiskArray:
     def __rmul__(self, other):
         return self.__mul__(other)
 
+    def __matmul__(self, other):
+        from ..linalg import dot as _dot
+
+        return _dot(self, other)
+
     def update_(self, new_value: "DiskArray") -> "DiskArray":
         """Overwrite THIS array's own file in place with new_value's data,
         tiled (never a full in-RAM copy). Returns self (same filename,
@@ -189,7 +195,9 @@ class DiskArrayType(HiType):
         fd, path = tempfile.mkstemp(suffix=".dat")
         os.close(fd)
         marker = jnp.zeros((), dtype=self.dtype)
-        return _own_fresh_file(DiskArray(path, self.shape, self.dtype, _lo_tracer=marker))
+        return _own_fresh_file(
+            DiskArray(path, self.shape, self.dtype, _lo_tracer=marker)
+        )
 
     def vspace_add(self, x, y):
         # Must compose through a real hi-primitive (jask's own `add`), not

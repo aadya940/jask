@@ -68,7 +68,13 @@ OPS = [
         (_mat((4, 6)), _mat((6, 3))),
         jask.dot,
         jnp.dot,
-        id="dot",
+        id="dot_2d",
+    ),
+    pytest.param(
+        (_mat((5, 3, 4)), _mat((5, 4, 6))),
+        jask.dot,
+        jnp.matmul,
+        id="dot_batched_3d",
     ),
     pytest.param(
         (_mat((4, 6)),),

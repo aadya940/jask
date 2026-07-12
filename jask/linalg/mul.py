@@ -115,11 +115,21 @@ class HiScalarMulBackward(VJPHiPrimitive):
 
         def run(a_lo, scalar_lo, g_lo):
             return _tiled_scalar_mul_backward(
-                a_path, a_ty.shape, a_ty.dtype, page_shape, float(scalar_lo), g_path, grad_a_path
+                a_path,
+                a_ty.shape,
+                a_ty.dtype,
+                page_shape,
+                float(scalar_lo),
+                g_path,
+                grad_a_path,
             )
 
         scalar_grad = io_callback(
-            run, jax.ShapeDtypeStruct((), a_ty.dtype), _as_lo(a), _as_lo(scalar), _as_lo(g)
+            run,
+            jax.ShapeDtypeStruct((), a_ty.dtype),
+            _as_lo(a),
+            _as_lo(scalar),
+            _as_lo(g),
         )
         grad_a = DiskArray(grad_a_path, a_ty.shape, a_ty.dtype, _lo_tracer=scalar_grad)
         return (grad_a, scalar_grad)
@@ -149,7 +159,12 @@ class HiScalarMul(VJPHiPrimitive):
         if not _is_tracing(_as_lo(a), _as_lo(scalar)):
             a_blocked = _ensure_on_disk(a)
             _tiled_scalar_mul_forward(
-                a_blocked.filename, a_ty.shape, a_ty.dtype, page_shape, float(scalar), out_path
+                a_blocked.filename,
+                a_ty.shape,
+                a_ty.dtype,
+                page_shape,
+                float(scalar),
+                out_path,
             )
             return _own_fresh_file(DiskArray(out_path, a_ty.shape, a_ty.dtype))
 
