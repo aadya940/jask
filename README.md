@@ -10,11 +10,11 @@ Jask
 Extremely lightweight, disk-backed arrays that behave like native JAX values!
 </p>
 
------
 
-* Full JAX integration: `jax.jit`, `jax.grad`, and both composed, in either order.
-* Zero-materialization: XLA's traced graph never carries a full array, even under `jit`.
-* `optax` works transparently - `DiskArray` is a registered pytree leaf.
+
+Full JAX integration: `jax.jit`, `jax.grad`, and both composed, in either order.
+Zero-materialization: XLA's traced graph never carries a full array, even under `jit`.
+`optax` works transparently - `DiskArray` is a registered pytree leaf.
 
 Train on data or weights that don't fit in RAM, without leaving ordinary JAX code!
 
