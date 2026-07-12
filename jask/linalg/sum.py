@@ -38,4 +38,32 @@ class Sum(BlockParallelOp):
             return cls([])
 
 
-sum = make_op(Sum)
+sum = make_op(
+    Sum,
+    doc="""Sum all elements of a disk-backed array to a scalar.
+
+    Reduces the whole array one tile at a time, never materializing it
+    in full. Unlike every other jask op, the result is small enough to
+    return as a real ``jax.Array`` directly rather than a `DiskArray`.
+
+    Parameters
+    ----------
+    a : DiskArray
+        The array to reduce.
+
+    Returns
+    -------
+    jax.Array
+        A real (not disk-backed) scalar `jax.Array` holding the sum of
+        every element of `a`.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import jask
+    >>> jask.set_memory_budget("1GB")
+    >>> a = jask.DiskArray.from_numpy(np.ones((4, 4), dtype=np.float32))
+    >>> float(jask.sum(a))
+    16.0
+    """,
+)

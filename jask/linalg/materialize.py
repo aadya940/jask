@@ -91,6 +91,35 @@ class HiMaterialize(VJPHiPrimitive):
 
 
 def hi_materialize(x: DiskArray) -> jax.Array:
-    """Bridge from disk-backed to in-memory JAX computation."""
+    """Bring a disk-backed array fully into memory as a real jax.Array.
+
+    Reads the whole array in one shot - only use this when `x` is known
+    to fit comfortably in memory, typically at the end of a disk-backed
+    pipeline (e.g. right before handing a small result to `jax.pmap`, or
+    computing a scalar loss). Differentiable: the backward pass writes
+    the incoming cotangent back to a disk-backed gradient.
+
+    Parameters
+    ----------
+    x : DiskArray
+        The disk-backed array to materialize. Its full contents will be
+        loaded into memory.
+
+    Returns
+    -------
+    jax.Array
+        An ordinary, in-memory `jax.Array` with the same shape, dtype,
+        and values as `x`.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import jask
+    >>> jask.set_memory_budget("1GB")
+    >>> a = jask.DiskArray.from_numpy(np.ones((4, 4), dtype=np.float32))
+    >>> real = jask.materialize(a)
+    >>> type(real).__name__
+    'ArrayImpl'
+    """
     op = HiMaterialize(DiskArrayType(x.shape, x.dtype, x.filename))
     return op(x)

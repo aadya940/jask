@@ -181,9 +181,13 @@ class OOCAlgorithm:
 # make_op: auto-generate a public op from a BlockParallelOp class
 
 
-def make_op(op_class):
+def make_op(op_class, doc: str | None = None):
     """Given a BlockParallelOp subclass, return the public function to call it.
     Handles hijax registration, forward/backward wiring, DiskArray bridging.
+
+    `doc`, if given, becomes the returned function's `__doc__` - the public
+    op modules pass a real NumPy-style docstring here, since `public_fn`
+    itself is a generic wrapper with nothing op-specific to say.
     Users write only the block-level math; this function does the rest.
 
     Under jax.jit, values flowing through XLA's traced graph are a TRIVIAL
@@ -429,6 +433,8 @@ def make_op(op_class):
         op = HiOpGenerated(*input_types, **kwargs)
         return op(*args)
 
+    if doc is not None:
+        public_fn.__doc__ = doc
     return public_fn
 
 

@@ -51,4 +51,51 @@ class Dot(BlockParallelOp):
         return cls(k_blocks=k_blocks)
 
 
-dot = make_op(Dot)
+dot = make_op(
+    Dot,
+    doc="""Matrix multiplication of two disk-backed arrays, with batching.
+
+    Computes ``a @ b`` one tile at a time along the contraction
+    dimension, never materializing either input or the output in full.
+    Matches ``jnp.matmul``/``@`` semantics: for 2D inputs this is plain
+    matrix multiplication; for higher-rank inputs, leading dimensions
+    are treated as batch dimensions (broadcast, not contracted).
+    Equivalent to ``a @ b`` via :class:`DiskArray`'s ``__matmul__``.
+
+    Note this differs from `numpy.dot`/`jnp.dot`'s own N-D contraction
+    rule (which sums over `a`'s last axis and `b`'s second-to-last axis
+    without batching) - `jask.dot` always matches `@`.
+
+    Parameters
+    ----------
+    a : DiskArray
+        Left operand, shape ``(*batch, M, K)``.
+    b : DiskArray
+        Right operand, shape ``(*batch, K, N)``. Batch dimensions must
+        match `a`'s exactly (no broadcasting between different batch
+        shapes yet).
+
+    Returns
+    -------
+    DiskArray
+        A new disk-backed array of shape ``(*batch, M, N)``.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import jask
+    >>> jask.set_memory_budget("1GB")
+    >>> a = jask.DiskArray.from_numpy(np.ones((4, 6), dtype=np.float32))
+    >>> b = jask.DiskArray.from_numpy(np.ones((6, 3), dtype=np.float32))
+    >>> c = jask.dot(a, b)
+    >>> np.asarray(c.to_memmap())[0, 0]
+    6.0
+
+    Batched (leading dim broadcasts, only the last two axes multiply):
+
+    >>> a3 = jask.DiskArray.from_numpy(np.ones((5, 4, 6), dtype=np.float32))
+    >>> b3 = jask.DiskArray.from_numpy(np.ones((5, 6, 3), dtype=np.float32))
+    >>> jask.dot(a3, b3).shape
+    (5, 4, 3)
+    """,
+)

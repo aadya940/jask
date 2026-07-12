@@ -69,12 +69,38 @@ def _adopt_as_persistent(path: str) -> None:
 
 @dataclass
 class DiskArray:
-    """Disk-backed array. Data lives in a memmap file at `filename`.
+    """A disk-backed array that behaves as a native JAX value.
 
-    `_lo_tracer` is set only transiently, by `DiskArrayType.raise_val` or a
-    HiPrimitive's own `expand`, and is always a TRIVIAL marker (never real
-    array data - see the zero-materialization notes on `DiskArrayType`
-    below). Real data always lives at `filename`. Not part of equality/repr.
+    `DiskArray` represents an array whose data lives entirely on disk
+    and is streamed through JAX one tile at a time - never fully loaded
+    into memory - while still composing with `jax.grad`, `jax.jit`, and
+    `optax` exactly like an ordinary `jax.Array` would.
+
+    Parameters
+    ----------
+    filename : str
+        Path to the memmap file backing this array's data.
+    shape : tuple of int
+        The array's shape.
+    dtype : numpy.dtype
+        The array's dtype.
+
+    Notes
+    -----
+    `_lo_tracer` is an internal field, set only transiently by
+    `DiskArrayType.raise_val` or a primitive's own `expand`, and is
+    always a trivial marker (never real array data - see
+    `DiskArrayType` for the zero-materialization mechanism). Real data
+    always lives at `filename`. Not part of equality or `repr`.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import jask
+    >>> jask.set_memory_budget("1GB")
+    >>> a = jask.DiskArray.from_numpy(np.ones((4, 4), dtype=np.float32))
+    >>> a.shape
+    (4, 4)
     """
 
     filename: str
@@ -82,11 +108,44 @@ class DiskArray:
     dtype: np.dtype
     _lo_tracer: object = field(default=None, compare=False, repr=False)
 
-    def to_memmap(self):
+    def to_memmap(self) -> np.memmap:
+        """Return a read/write `numpy.memmap` view of this array's file.
+
+        Returns
+        -------
+        numpy.memmap
+            A memmap of shape `self.shape` and dtype `self.dtype`. Reads
+            and writes go straight to the backing file; no data is
+            copied into memory until a specific region is accessed.
+        """
         return np.memmap(self.filename, dtype=self.dtype, mode="r+", shape=self.shape)
 
     @classmethod
     def from_numpy(cls, arr: np.ndarray) -> "DiskArray":
+        """Write a numpy array to a temp file and wrap it as a DiskArray.
+
+        Intended for quick experiments with arrays small enough to
+        build in memory first. For genuinely large data, construct
+        `DiskArray` directly with an existing file's path instead.
+
+        Parameters
+        ----------
+        arr : numpy.ndarray
+            The array to write to disk.
+
+        Returns
+        -------
+        DiskArray
+            A new disk-backed array holding a copy of `arr`'s data.
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import jask
+        >>> a = jask.DiskArray.from_numpy(np.arange(4, dtype=np.float32))
+        >>> np.asarray(a.to_memmap())
+        array([0., 1., 2., 3.], dtype=float32)
+        """
         fd, path = tempfile.mkstemp(suffix=".dat")
         os.close(fd)
         mm = np.memmap(path, dtype=arr.dtype, mode="w+", shape=arr.shape)
@@ -127,17 +186,46 @@ class DiskArray:
         return _dot(self, other)
 
     def update_(self, new_value: "DiskArray") -> "DiskArray":
-        """Overwrite THIS array's own file in place with new_value's data,
-        tiled (never a full in-RAM copy). Returns self (same filename,
-        same identity).
+        """Overwrite this array's file in place with `new_value`'s data.
 
-        This is the one explicit mechanism for loop-carried state
-        (parameters, optimizer buffers) under jax.jit: reassigning
-        `a = a + updates` gives `a` a FRESH filename every call, which
-        makes jax.jit retrace on every single step (a new filename is a
-        new DiskArrayType, a cache miss). `a = a.update_(a + updates)`
-        keeps `a`'s filename identical across calls, so jit compiles once
-        and reuses that executable for the rest of the loop.
+        Copies `new_value`'s data into this array's own backing file,
+        tile by tile (never a full in-memory copy), and returns a
+        `DiskArray` with the same filename/identity as `self`.
+
+        This is the mechanism for loop-carried state (parameters,
+        optimizer buffers) under `jax.jit`. Reassigning
+        ``a = a + updates`` gives `a` a fresh filename every call, which
+        makes `jax.jit` retrace on every single step (a new filename is
+        a new type, so it's a cache miss). ``a = a.update_(a + updates)``
+        keeps `a`'s filename identical across calls, so `jax.jit`
+        compiles once and reuses that executable for the rest of the
+        loop.
+
+        Parameters
+        ----------
+        new_value : DiskArray
+            The array whose data should replace this array's contents.
+            Must have the same shape and dtype as `self`.
+
+        Returns
+        -------
+        DiskArray
+            A `DiskArray` with the same filename as `self`, now holding
+            `new_value`'s data.
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import jask
+        >>> jask.set_memory_budget("1GB")
+        >>> a = jask.DiskArray.from_numpy(np.zeros((4, 4), dtype=np.float32))
+        >>> original_path = a.filename
+        >>> new_value = jask.DiskArray.from_numpy(np.ones((4, 4), dtype=np.float32))
+        >>> a = a.update_(new_value)
+        >>> a.filename == original_path
+        True
+        >>> np.asarray(a.to_memmap())[0, 0]
+        1.0
         """
         return _update_op(self, new_value)
 

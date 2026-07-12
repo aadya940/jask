@@ -91,17 +91,27 @@ _default_policy: Policy | None = None
 
 
 def set_memory_budget(max_memory: int | str, pages_per_group: int = 3):
-    """Set the process-wide default memory budget used by ops that don't
-    receive an explicit Policy (e.g. jask.dot(a, b)). Call this once,
-    not per-op-call.
+    """Set the process-wide memory budget used by every jask op.
 
-    `page_size` (the actual per-block size derive_page_shape uses) is
-    derived from max_memory here - nothing else in the block loop enforces
-    the budget (resident_pages/working_capacity are tracked but never
-    checked against), so page_size is the only real lever that controls
-    how much memory one block read actually costs. Dividing by
-    pages_per_group leaves headroom for more than one block resident at
-    once (previous cached block + current + op-internal scratch).
+    Call this once at the start of your program, not per-op-call. Every
+    op (``jask.dot``, ``jask.add``, etc.) that doesn't receive an
+    explicit `Policy` uses this budget to decide how large a tile ("page")
+    of an array it reads into memory at a time.
+
+    Parameters
+    ----------
+    max_memory : int or str
+        The memory budget, either in bytes (int) or as a string with a
+        unit suffix, e.g. ``"4GB"``, ``"512MB"``.
+    pages_per_group : int, optional
+        Divides `max_memory` to leave headroom for more than one tile
+        being resident at once (the previous cached block, the current
+        one, and op-internal scratch space). Default 3.
+
+    Examples
+    --------
+    >>> import jask
+    >>> jask.set_memory_budget("4GB")
     """
     global _default_policy
     max_memory_bytes = _parse_memory(max_memory)

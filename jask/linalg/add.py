@@ -21,4 +21,36 @@ class Add(BlockParallelOp):
         return a_shape
 
 
-add = make_op(Add)
+add = make_op(
+    Add,
+    doc="""Elementwise sum of two disk-backed arrays.
+
+    Computes ``a + b`` one tile at a time, never materializing either
+    input or the output in full. Equivalent to ``a + b`` via
+    :class:`DiskArray`'s ``__add__``.
+
+    Parameters
+    ----------
+    a : DiskArray
+        First operand.
+    b : DiskArray
+        Second operand. Must have the same shape and dtype as `a`.
+
+    Returns
+    -------
+    DiskArray
+        A new disk-backed array of the same shape as `a`, holding
+        ``a + b``.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import jask
+    >>> jask.set_memory_budget("1GB")
+    >>> a = jask.DiskArray.from_numpy(np.ones((4, 4), dtype=np.float32))
+    >>> b = jask.DiskArray.from_numpy(np.ones((4, 4), dtype=np.float32))
+    >>> c = jask.add(a, b)
+    >>> np.asarray(c.to_memmap())[0, 0]
+    2.0
+    """,
+)

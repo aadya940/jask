@@ -207,9 +207,55 @@ def _is_disk_array(x) -> bool:
 
 
 def mul(a, b):
-    """a * b - elementwise (both DiskArrays) or scalar (one is not a
-    DiskArray - a Python number or a jax scalar, concrete or traced).
-    Order-independent: mul(a, 3.5) and mul(3.5, a) both work."""
+    """Elementwise or scalar multiplication of disk-backed arrays.
+
+    Computes ``a * b`` one tile at a time, never materializing either
+    input or the output in full. If either argument is not a
+    `DiskArray` (a Python number or a jax scalar, concrete or traced -
+    e.g. a learning rate passed as a jitted argument), the other is
+    scaled by it elementwise. Order-independent: ``mul(a, 3.5)`` and
+    ``mul(3.5, a)`` both work. Equivalent to ``a * b`` via
+    :class:`DiskArray`'s ``__mul__``/``__rmul__``.
+
+    Parameters
+    ----------
+    a : DiskArray or scalar
+        First operand. At least one of `a`, `b` must be a `DiskArray`.
+    b : DiskArray or scalar
+        Second operand.
+
+    Returns
+    -------
+    DiskArray
+        A new disk-backed array of the same shape as whichever operand
+        is a `DiskArray`.
+
+    Raises
+    ------
+    TypeError
+        If neither `a` nor `b` is a `DiskArray`.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import jask
+    >>> jask.set_memory_budget("1GB")
+    >>> a = jask.DiskArray.from_numpy(np.full((4, 4), 2.0, dtype=np.float32))
+
+    Elementwise, both operands `DiskArray`:
+
+    >>> b = jask.DiskArray.from_numpy(np.full((4, 4), 3.0, dtype=np.float32))
+    >>> np.asarray(jask.mul(a, b).to_memmap())[0, 0]
+    6.0
+
+    Scalar, either order - the scalar can be a Python literal or a real
+    (even jit-traced) jax value:
+
+    >>> np.asarray(jask.mul(a, 2.5).to_memmap())[0, 0]
+    5.0
+    >>> np.asarray(jask.mul(2.5, a).to_memmap())[0, 0]
+    5.0
+    """
     a_is_scalar = not _is_disk_array(a)
     b_is_scalar = not _is_disk_array(b)
 

@@ -45,4 +45,40 @@ class Transpose(BlockParallelOp):
         return cls(axes=axes)
 
 
-transpose = make_op(Transpose)
+transpose = make_op(
+    Transpose,
+    doc="""Permute the axes of a disk-backed array.
+
+    Computes the transpose one tile at a time, never materializing the
+    input or output in full.
+
+    Parameters
+    ----------
+    a : DiskArray
+        The array to transpose.
+    axes : tuple of int, optional
+        A permutation of ``range(a.ndim)``. If not given, reverses the
+        order of all axes (numpy's default transpose behavior).
+
+    Returns
+    -------
+    DiskArray
+        A new disk-backed array with axes permuted according to `axes`.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import jask
+    >>> jask.set_memory_budget("1GB")
+    >>> a = jask.DiskArray.from_numpy(np.arange(6, dtype=np.float32).reshape(2, 3))
+    >>> t = jask.transpose(a)
+    >>> np.asarray(t.to_memmap()).shape
+    (3, 2)
+
+    Permute a 3D array's axes explicitly:
+
+    >>> b = jask.DiskArray.from_numpy(np.zeros((3, 4, 5), dtype=np.float32))
+    >>> jask.transpose(b, axes=(2, 0, 1)).shape
+    (5, 3, 4)
+    """,
+)
