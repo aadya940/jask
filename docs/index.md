@@ -5,5 +5,6 @@
 :maxdepth: 2
 :hidden:
 
+extending
 api
 ```
