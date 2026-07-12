@@ -9,6 +9,7 @@ Jask
 <p align="center">
 Extremely lightweight, disk-backed arrays that behave like native JAX values!
 </p>
+---
 
 * Full JAX integration: `jax.jit`, `jax.grad`, and both composed, in either order.
 * Zero-materialization: XLA's traced graph never carries a full array, even under `jit`.
