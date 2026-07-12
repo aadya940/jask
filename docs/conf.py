@@ -42,3 +42,9 @@ source_suffix = {
 
 html_theme = "sphinx_rtd_theme"
 html_static_path = ["_static"]
+
+# README.md uses a raw <img src="logo.png"> tag (so it also renders
+# correctly on GitHub, relative to the repo root) - Sphinx doesn't
+# rewrite raw HTML asset paths, so the file needs to physically exist
+# next to the built index.html too.
+html_extra_path = ["../logo.png"]
