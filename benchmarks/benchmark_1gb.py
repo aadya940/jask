@@ -22,7 +22,7 @@ from jask.base import DiskArray, get_config, derive_page_shape
 
 # Real ext4-on-NVMe disk, not /tmp (which is tmpfs - RAM-backed, no real
 # disk latency at all). Confirmed via `mount` before this benchmark.
-DISK_DIR = "/home/aadya-chinubhai/Desktop/projects/personal-projects/.benchdata"
+DISK_DIR = "/projects/.benchdata"
 
 
 def make_array(data: np.ndarray, page_shape: tuple) -> DiskArray:
