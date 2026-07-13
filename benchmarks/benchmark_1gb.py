@@ -18,7 +18,7 @@ import dask
 import dask.array as da
 
 import jask
-from jask.base import DiskArray, get_default_policy, derive_page_shape
+from jask.base import DiskArray, get_config, derive_page_shape
 
 # Real ext4-on-NVMe disk, not /tmp (which is tmpfs - RAM-backed, no real
 # disk latency at all). Confirmed via `mount` before this benchmark.
@@ -47,8 +47,13 @@ def main():
     n_trials = 2
 
     jask.set_memory_budget("4GB")
-    policy = get_default_policy()
-    page_shape = derive_page_shape(policy, np.float32, (N, N))
+    policy = get_config()
+    # num_inputs=2 (dot takes a, b), phase="forward" - matches what jask.dot
+    # itself derives internally, so the "matched chunk" dask comparison is
+    # actually comparing against the same tiling jask uses.
+    page_shape = derive_page_shape(
+        policy, np.float32, (N, N), num_inputs=2, phase="forward"
+    )
 
     print(
         f"N={N} ({(N*N*4)/1024**3:.2f} GiB per array), jask-derived "

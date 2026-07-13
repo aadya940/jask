@@ -13,7 +13,6 @@ Internal:
 - `SpillFile`: ephemeral `BlockedArray` for gradient buffers etc.
 """
 
-import tempfile
 import os
 import mmap
 import itertools
@@ -26,7 +25,7 @@ import jax.numpy as jnp
 from jax.experimental import io_callback
 from jax.experimental.hijax import HiType, VJPHiPrimitive, register_hitype, ShapedArray
 
-from .base_page import IOCost
+from .base_page import IOCost, scratch_mkstemp
 
 
 def _safe_remove(path):
@@ -146,7 +145,7 @@ class DiskArray:
         >>> np.asarray(a.to_memmap())
         array([0., 1., 2., 3.], dtype=float32)
         """
-        fd, path = tempfile.mkstemp(suffix=".dat")
+        fd, path = scratch_mkstemp(suffix=".dat")
         os.close(fd)
         mm = np.memmap(path, dtype=arr.dtype, mode="w+", shape=arr.shape)
         mm[:] = arr
@@ -279,7 +278,7 @@ class DiskArrayType(HiType):
         # Used for an unused/zero-contribution cotangent branch within a
         # trace, not fed back as an external input across calls - a fresh
         # path is fine here (no retracing concern).
-        fd, path = tempfile.mkstemp(suffix=".dat")
+        fd, path = scratch_mkstemp(suffix=".dat")
         os.close(fd)
         marker = jnp.zeros((), dtype=self.dtype)
         return _own_fresh_file(
@@ -455,7 +454,7 @@ class HiUpdate(VJPHiPrimitive):
         super().__init__()
 
     def expand(self, self_val, new_val):
-        from .base_page import get_default_policy, derive_page_shape
+        from .base_page import get_config, derive_page_shape
 
         self_filename, new_filename = self._self_filename, self._new_filename
         shape, dtype = self._shape, self._dtype
@@ -464,7 +463,7 @@ class HiUpdate(VJPHiPrimitive):
         # single-input forward pass; num_inputs=1 forward is a safe,
         # slightly conservative fit.
         page_shape = derive_page_shape(
-            get_default_policy(), dtype, shape, num_inputs=1, phase="forward"
+            get_config(), dtype, shape, num_inputs=1, phase="forward"
         )
 
         def run(m1, m2):
@@ -491,7 +490,7 @@ class SpillFile(BlockedArray):
 
     @classmethod
     def create(cls, full_shape, dtype, page_shape) -> "SpillFile":
-        fd, path = tempfile.mkstemp(suffix=".spill")
+        fd, path = scratch_mkstemp(suffix=".spill")
         os.close(fd)
         np.memmap(path, dtype=dtype, mode="w+", shape=full_shape)
         return cls(path, full_shape, dtype, page_shape)

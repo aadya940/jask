@@ -9,6 +9,7 @@ docs/_build/
 .env
 
 .benchdata/
+.jask_scratch/
 *.dat
 *.spill
 *.ooc
