@@ -23,7 +23,7 @@ import dask
 import dask.array as da
 
 import jask
-from jask.base import DiskArray, Policy
+from jask.base import DiskArray, Config
 from jask.base import make_jax_op
 from jask.linalg.matmul import Dot
 
@@ -67,7 +67,10 @@ def bench_jask_as_used(A, B, page, n_trials):
 
 
 def bench_jask_steady_state(A, B, page, n_trials):
-    policy = Policy(max_memory=2 * 1024**3, pages_per_group=3)
+    # NOTE: this benchmark also calls make_jax_op below, which was removed
+    # as confirmed dead code earlier this session - stale independent of
+    # the Config rename, out of scope for this fix.
+    policy = Config(max_memory=2 * 1024**3, scratch_dir=os.getcwd())
     k_blocks = -(-A.shape[1] // page)
     op = Dot(k_blocks=k_blocks)
     jax_op = make_jax_op(op, policy, (page, page))  # built + JIT'd once

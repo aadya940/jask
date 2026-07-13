@@ -11,7 +11,7 @@ import numpy as np
 import dask.array as da
 
 import jask
-from jask.base import DiskArray, get_default_policy, derive_page_shape
+from jask.base import DiskArray, get_config, derive_page_shape
 
 DISK_DIR = "/home/aadya-chinubhai/Desktop/projects/personal-projects/.benchdata"
 
@@ -46,7 +46,7 @@ def main():
     N = 16384
 
     jask.set_memory_budget("4GB")
-    policy = get_default_policy()
+    policy = get_config()
     page_shape = derive_page_shape(policy, np.float32, (N, N))
     print(f"N={N}, page_shape={page_shape}")
 

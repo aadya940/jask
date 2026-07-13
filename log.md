@@ -1,5 +1,17 @@
 # jask status log
 
+## CRITICAL, now fixed: every internal temp file could silently land on RAM instead of disk
+
+Found via a real crash while re-running a jask-vs-dask benchmark: all 8 of jask's internal `tempfile.mkstemp()` call sites (op outputs, gradient buffers, `.spill` files) had no `dir=` parameter, so every one silently fell back to Python's `tempfile.gettempdir()` - `/tmp` on the dev machine, which is **tmpfs (RAM-backed)**, not disk. This is common on modern Linux and nearly universal in containers. A tmpfs file's bytes can't be flushed to physical storage and evicted under memory pressure the way a real disk file's can - its backing storage *is* RAM - so every op's output silently consumed real, non-reclaimable memory for as long as it existed, invisibly, defeating jask's entire out-of-core guarantee. This very likely explains multiple "unexplained" crashes and the persistent memory pressure seen earlier in the same session, not just the one that surfaced it.
+
+**Fixed on the `scratch-dir-safety` branch:**
+- `Config` (`base_page.py`) replaces `Policy`, now owning both the memory budget *and* an explicit `scratch_dir` - every one of jask's own files is created via a new `scratch_mkstemp()` helper that always passes `dir=`, never relying on the OS default.
+- `set_memory_budget` checks the resolved `scratch_dir` (explicit or default) against RAM-backed filesystems via `psutil.disk_partitions()` and **raises by default** if it's tmpfs/ramfs - not a warning, a hard failure, since silent RAM usage is a correctness-adjacent violation of the whole premise, not a performance quirk. `allow_tmpfs=True` opts out explicitly for anyone who genuinely wants it (e.g. deliberately testing with small data).
+- Default `scratch_dir` (if none given) is `.jask_scratch` under the current working directory - still subject to the same tmpfs check, so a bad default is caught too, not trusted blindly.
+- All 8 `tempfile.mkstemp()` call sites (`base_algo.py` x4, `disk_array.py` x3, `mul.py` x1) updated to `scratch_mkstemp()`.
+- 19 tests in `test_page_size.py`, including the actual regression test (`test_set_memory_budget_rejects_tmpfs_scratch_dir_by_default`) - this is what should have caught the original problem immediately instead of an entire session of confusion.
+- Verified end-to-end: explicit tmpfs `scratch_dir` correctly rejected; default now resolves to real disk, confirmed not under `/tmp`.
+
 ## Working
 
 - All 8 ops (add, sub, mul, square, transpose, sum, dot, materialize) - correct, disk-only, eager.

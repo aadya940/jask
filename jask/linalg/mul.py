@@ -1,5 +1,4 @@
 import os
-import tempfile
 
 import numpy as np
 import jax
@@ -8,7 +7,7 @@ from jax.experimental.hijax import VJPHiPrimitive, ShapedArray
 
 from ..base import BlockParallelOp
 from ..base.base_algo import make_op
-from ..base.base_page import get_default_policy, derive_page_shape
+from ..base.base_page import get_config, derive_page_shape, scratch_mkstemp
 from ..base.disk_array import (
     BlockedArray,
     DiskArray,
@@ -98,7 +97,7 @@ class HiScalarMulBackward(VJPHiPrimitive):
         # num_inputs=1: only `a` is an array input - the scalar isn't
         # tiled/block-resident the way an array operand is.
         page_shape = derive_page_shape(
-            get_default_policy(), a_ty.dtype, a_ty.shape, num_inputs=1, phase="backward"
+            get_config(), a_ty.dtype, a_ty.shape, num_inputs=1, phase="backward"
         )
 
         if not _is_tracing(_as_lo(a), _as_lo(scalar), _as_lo(g)):
@@ -146,7 +145,7 @@ class HiScalarMul(VJPHiPrimitive):
 
     def __init__(self, a_ty: DiskArrayType, scalar_ty):
         self.in_avals = (a_ty, scalar_ty)
-        fd, out_path = tempfile.mkstemp(suffix=".dat")
+        fd, out_path = scratch_mkstemp(suffix=".dat")
         os.close(fd)
         self._out_path = out_path
         self.out_aval = DiskArrayType(a_ty.shape, a_ty.dtype, out_path)
@@ -159,7 +158,7 @@ class HiScalarMul(VJPHiPrimitive):
         a_ty = self._a_ty
         out_path = self._out_path
         page_shape = derive_page_shape(
-            get_default_policy(), a_ty.dtype, a_ty.shape, num_inputs=1, phase="forward"
+            get_config(), a_ty.dtype, a_ty.shape, num_inputs=1, phase="forward"
         )
 
         if not _is_tracing(_as_lo(a), _as_lo(scalar)):

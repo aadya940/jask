@@ -24,12 +24,12 @@ def many_block_array(rng):
     """~380MB array, forced into ~36 blocks by a small memory budget -
     large enough that a full-materialization regression is unmissable,
     small enough to keep this test fast."""
-    original_policy = jask.base.base_page._default_policy
+    original_config = jask.base.base_page._config
     jask.set_memory_budget("16MB")
     A = rng.random((10000, 10000)).astype(np.float32)
     a = jask.DiskArray.from_numpy(A)
     yield A, a
-    jask.base.base_page._default_policy = original_policy
+    jask.base.base_page._config = original_config
 
 
 ## NOTE on the limits below: memray's default accounting counts each

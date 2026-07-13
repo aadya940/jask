@@ -5,7 +5,6 @@ from .utils import _ReusingBlockReader
 
 from typing import Union
 import os
-import tempfile
 
 import numpy as np
 import jax
@@ -77,7 +76,7 @@ class OOCAlgorithm:
         """Create the (empty) output BlockedArray at the op's declared shape."""
         out_shape = self._op.output_shape(*(a.full_shape for a in inputs))
         if output_filename is None:
-            fd, output_filename = tempfile.mkstemp(suffix=".ooc")
+            fd, output_filename = scratch_mkstemp(suffix=".ooc")
             os.close(fd)
         return BlockedArray.create(
             output_filename, out_shape, inputs[0].dtype, output_page_shape
@@ -199,7 +198,7 @@ def make_op(op_class, doc: str | None = None):
 
     A bare eager call (no jit, no grad) skips io_callback and stays lazy.
     """
-    from .base_page import get_default_policy, derive_page_shape
+    from .base_page import get_config, derive_page_shape
     from .disk_array import (
         DiskArray,
         DiskArrayType,
@@ -255,7 +254,7 @@ def make_op(op_class, doc: str | None = None):
 
             if not _is_tracing(*[_as_lo(x) for x in xs], _as_lo(g)):
                 # Bare eager call - stay fully lazy, no io_callback needed.
-                policy = get_default_policy()
+                policy = get_config()
                 blockeds = [
                     _ensure_on_disk(
                         x, derive_page_shape(policy, dtype, ty.shape, num_inputs, "backward")
@@ -264,7 +263,7 @@ def make_op(op_class, doc: str | None = None):
                 ]
                 op_impl = op_class.from_inputs(*blockeds, **op_kwargs)
                 if g_is_scalar:
-                    fd, path = tempfile.mkstemp(suffix=".dat")
+                    fd, path = scratch_mkstemp(suffix=".dat")
                     os.close(fd)
                     mm = np.memmap(path, dtype=dtype, mode="w+", shape=())
                     mm[()] = float(g)
@@ -290,7 +289,7 @@ def make_op(op_class, doc: str | None = None):
                 # filename instead) - needed so JAX sees the data
                 # dependency and runs this after whatever wrote g's file.
                 *xlos, g_lo = los
-                policy = get_default_policy()
+                policy = get_config()
                 blockeds = [
                     _input_blocked(
                         f, s, dtype, derive_page_shape(policy, dtype, s, num_inputs, "backward")
@@ -300,7 +299,7 @@ def make_op(op_class, doc: str | None = None):
                 op_impl = op_class.from_inputs(*blockeds, **op_kwargs)
                 out_shape = op_impl.output_shape(*(b.full_shape for b in blockeds))
                 if g_is_scalar:
-                    fd, g_path = tempfile.mkstemp(suffix=".dat")
+                    fd, g_path = scratch_mkstemp(suffix=".dat")
                     os.close(fd)
                     d_out_ba = _write_scalar(g_path, dtype, g_lo)
                 else:
@@ -345,7 +344,7 @@ def make_op(op_class, doc: str | None = None):
                 self._output_is_scalar = True
                 self._out_path = None
             else:
-                fd, out_path = tempfile.mkstemp(suffix=".dat")
+                fd, out_path = scratch_mkstemp(suffix=".dat")
                 os.close(fd)
                 self._out_path = out_path
                 self.out_aval = DiskArrayType(out_shape, dtype, out_path)
@@ -364,7 +363,7 @@ def make_op(op_class, doc: str | None = None):
 
             if not _is_tracing(*los):
                 # Bare eager call - stay fully lazy, no io_callback needed.
-                policy = get_default_policy()
+                policy = get_config()
                 blockeds = [
                     _ensure_on_disk(
                         x, derive_page_shape(policy, dtype, x.shape, num_inputs, "forward")
@@ -389,7 +388,7 @@ def make_op(op_class, doc: str | None = None):
             shapes = [x.shape for x in xs]
 
             def run(*los):
-                policy = get_default_policy()
+                policy = get_config()
                 blockeds = [
                     _input_blocked(
                         f, s, dtype, derive_page_shape(policy, dtype, s, num_inputs, "forward")

@@ -106,6 +106,17 @@ step 4: loss = 67.1164
 
 See [example.py](example.py) for the full version, including a manual gradient-correctness check against numpy.
 
+`set_memory_budget` also picks where jask's own scratch files (op outputs,
+gradients) are written. By default that's `.jask_scratch` in the current
+working directory. It refuses to use a RAM-backed filesystem (like `/tmp` on
+many Linux systems, which is often tmpfs) as scratch space, since that would
+silently defeat the out-of-core guarantee - pass `scratch_dir=` to pick a
+real-disk location explicitly, or `allow_tmpfs=True` to opt in anyway:
+
+```python
+jask.set_memory_budget("4GB", scratch_dir="/data/jask_scratch")
+```
+
 ## Scope: single machine, one process
 
 Jask solves "my array doesn't fit in this machine's RAM." It does not solve "my

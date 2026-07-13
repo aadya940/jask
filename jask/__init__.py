@@ -1,4 +1,4 @@
-from .base import set_memory_budget, Policy
+from .base import set_memory_budget, Config
 from .base.disk_array import DiskArray
 
 # Public API - each op is auto-registered as a hijax primitive via make_op.
