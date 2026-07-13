@@ -153,13 +153,12 @@ class DiskArray:
         mm.flush()
         return _own_fresh_file(cls(path, arr.shape, arr.dtype))
 
-    def _to_blocked(self) -> "BlockedArray":
+    def _to_blocked(self, page_shape: tuple) -> "BlockedArray":
         """Bridge to BlockedArray so ops can reuse the existing OOCAlgorithm
-        block-loop machinery. Derives page_shape from the current policy."""
-        from .base_page import get_default_policy, derive_page_shape
-
-        policy = get_default_policy()
-        page_shape = derive_page_shape(policy, self.dtype, self.shape)
+        block-loop machinery. page_shape must be supplied by the caller
+        (derived once per op call, from that op's own num_inputs/phase) -
+        not derived independently here, so every array involved in one op
+        call is guaranteed to share the same page_shape."""
         return BlockedArray(self.filename, self.shape, self.dtype, page_shape)
 
     def __add__(self, other):
@@ -315,7 +314,7 @@ def _as_lo(x):
     return x._lo_tracer if x._lo_tracer is not None else jnp.zeros((), x.dtype)
 
 
-def _ensure_on_disk(x: DiskArray) -> "BlockedArray":
+def _ensure_on_disk(x: DiskArray, page_shape: tuple) -> "BlockedArray":
     """Bridge a DiskArray to a BlockedArray for the bare-eager fast path
     (no active JAX trace anywhere), which skips io_callback entirely.
 
@@ -323,9 +322,10 @@ def _ensure_on_disk(x: DiskArray) -> "BlockedArray":
     time any Python code outside a jit call holds a DiskArray, its file is
     already correct (jax.jit blocks until every io_callback, including the
     one that wrote it, has completed). So this is a thin alias for
-    `_to_blocked()`.
+    `_to_blocked()`. page_shape must be supplied by the caller (see
+    `_to_blocked`'s docstring).
     """
-    return x._to_blocked()
+    return x._to_blocked(page_shape)
 
 
 #  internal: BlockedArray + SpillFile
@@ -459,7 +459,13 @@ class HiUpdate(VJPHiPrimitive):
 
         self_filename, new_filename = self._self_filename, self._new_filename
         shape, dtype = self._shape, self._dtype
-        page_shape = derive_page_shape(get_default_policy(), dtype, shape)
+        # A straight tiled copy (read one block, write one block) - no
+        # accumulator/combine step, so this is even lighter than a normal
+        # single-input forward pass; num_inputs=1 forward is a safe,
+        # slightly conservative fit.
+        page_shape = derive_page_shape(
+            get_default_policy(), dtype, shape, num_inputs=1, phase="forward"
+        )
 
         def run(m1, m2):
             _tiled_copy(new_filename, self_filename, shape, dtype, page_shape)

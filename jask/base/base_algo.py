@@ -25,10 +25,9 @@ class OOCAlgorithm:
     tracking).
     """
 
-    def __init__(self, op: Union[BlockParallelOp, CustomOp], policy: Policy):
-        """Store the op/policy and JIT-compile the op's block functions once."""
+    def __init__(self, op: Union[BlockParallelOp, CustomOp]):
+        """Store the op and JIT-compile its block functions once."""
         self._op = op
-        self._policy = policy
         self._io_tracker = IOCost(total_pages=0)
 
         if isinstance(op, BlockParallelOp):
@@ -92,7 +91,6 @@ class OOCAlgorithm:
         (an op like Sum has K equal to every block in the input, so batching
         the reads would defeat the memory budget entirely)."""
         block_idx_groups = list(self._op.index_map(out_idx))  # K entries
-        self._policy.mark_loaded()
 
         acc = None
         for idxs in block_idx_groups:
@@ -107,7 +105,6 @@ class OOCAlgorithm:
             # (and unfreed) instead of being bounded to the current block.
             jax.block_until_ready(acc)
 
-        self._policy.mark_evicted()
         return acc
 
     def run_backward(
@@ -158,7 +155,6 @@ class OOCAlgorithm:
         grads - one k at a time, same reasoning as _compute_output_block."""
         d_out_block = jax.device_put(d_out.read_block(out_idx, self._io_tracker))
         block_idx_groups = list(self._op.index_map(out_idx))  # K entries
-        self._policy.mark_loaded()
 
         for idxs in block_idx_groups:
             blocks_k = [
@@ -174,8 +170,6 @@ class OOCAlgorithm:
                 grad_arr.write_block(
                     idx, existing + np.asarray(grad_block), self._io_tracker
                 )
-
-        self._policy.mark_evicted()
 
 
 # make_op: auto-generate a public op from a BlockParallelOp class
@@ -215,11 +209,12 @@ def make_op(op_class, doc: str | None = None):
         _own_fresh_file,
     )
 
-    def _input_blocked(filename, shape, dtype):
+    def _input_blocked(filename, shape, dtype, page_shape):
         """Block-addressable view of an input's existing file - never
         writes, since the file already holds the correct data (the
-        DiskArray's lo_val is only ever a trivial marker, never real data)."""
-        page_shape = derive_page_shape(get_default_policy(), dtype, shape)
+        DiskArray's lo_val is only ever a trivial marker, never real data).
+        page_shape must be derived by the caller using this op call's own
+        num_inputs/phase, not re-derived independently here."""
         return BlockedArray(filename, shape, dtype, page_shape)
 
     def _write_scalar(path, dtype, lo_val):
@@ -256,10 +251,17 @@ def make_op(op_class, doc: str | None = None):
             op_kwargs = self._op_kwargs
             g_is_scalar = self._g_is_scalar
             grad_paths = [ty.to_tangent_aval().filename for ty in x_avals]
+            num_inputs = len(xs)
 
             if not _is_tracing(*[_as_lo(x) for x in xs], _as_lo(g)):
                 # Bare eager call - stay fully lazy, no io_callback needed.
-                blockeds = [_ensure_on_disk(x) for x in xs]
+                policy = get_default_policy()
+                blockeds = [
+                    _ensure_on_disk(
+                        x, derive_page_shape(policy, dtype, ty.shape, num_inputs, "backward")
+                    )
+                    for x, ty in zip(xs, x_avals)
+                ]
                 op_impl = op_class.from_inputs(*blockeds, **op_kwargs)
                 if g_is_scalar:
                     fd, path = tempfile.mkstemp(suffix=".dat")
@@ -269,9 +271,11 @@ def make_op(op_class, doc: str | None = None):
                     mm.flush()
                     d_out_ba = BlockedArray(path, (), dtype, ())
                 else:
-                    d_out_ba = _ensure_on_disk(g)
-                policy = get_default_policy()
-                algo = OOCAlgorithm(op_impl, policy)
+                    g_page = derive_page_shape(
+                        policy, dtype, self._g_ty.shape, num_inputs, "backward"
+                    )
+                    d_out_ba = _ensure_on_disk(g, g_page)
+                algo = OOCAlgorithm(op_impl)
                 grads_ba = algo.run_backward(blockeds, d_out_ba, grad_paths)
                 return tuple(
                     DiskArray(path, x.shape, x.dtype) for x, path in zip(xs, grad_paths)
@@ -286,8 +290,12 @@ def make_op(op_class, doc: str | None = None):
                 # filename instead) - needed so JAX sees the data
                 # dependency and runs this after whatever wrote g's file.
                 *xlos, g_lo = los
+                policy = get_default_policy()
                 blockeds = [
-                    _input_blocked(f, s, dtype) for f, s in zip(filenames, shapes)
+                    _input_blocked(
+                        f, s, dtype, derive_page_shape(policy, dtype, s, num_inputs, "backward")
+                    )
+                    for f, s in zip(filenames, shapes)
                 ]
                 op_impl = op_class.from_inputs(*blockeds, **op_kwargs)
                 out_shape = op_impl.output_shape(*(b.full_shape for b in blockeds))
@@ -298,12 +306,11 @@ def make_op(op_class, doc: str | None = None):
                 else:
                     # g's real data is already on disk (written when it was
                     # produced) - just reference it, no write needed.
-                    g_page = derive_page_shape(get_default_policy(), dtype, out_shape)
+                    g_page = derive_page_shape(policy, dtype, out_shape, num_inputs, "backward")
                     d_out_ba = BlockedArray(
                         self._g_ty.filename, out_shape, dtype, g_page
                     )
-                policy = get_default_policy()
-                algo = OOCAlgorithm(op_impl, policy)
+                algo = OOCAlgorithm(op_impl)
                 algo.run_backward(blockeds, d_out_ba, grad_paths)
                 return np.float32(0.0)
 
@@ -353,18 +360,24 @@ def make_op(op_class, doc: str | None = None):
             out_shape = self._out_shape
             output_is_scalar = self._output_is_scalar
             out_path = self._out_path
+            num_inputs = len(xs)
 
             if not _is_tracing(*los):
                 # Bare eager call - stay fully lazy, no io_callback needed.
-                blockeds = [_ensure_on_disk(x) for x in xs]
+                policy = get_default_policy()
+                blockeds = [
+                    _ensure_on_disk(
+                        x, derive_page_shape(policy, dtype, x.shape, num_inputs, "forward")
+                    )
+                    for x in xs
+                ]
                 op_impl = op_class.from_inputs(*blockeds, **op_kwargs)
                 out_page_shape = (
                     ()
                     if out_shape == ()
-                    else derive_page_shape(get_default_policy(), dtype, out_shape)
+                    else derive_page_shape(policy, dtype, out_shape, num_inputs, "forward")
                 )
-                policy = get_default_policy()
-                algo = OOCAlgorithm(op_impl, policy)
+                algo = OOCAlgorithm(op_impl)
                 result_ba = algo.run_forward(
                     blockeds, out_page_shape, output_filename=out_path
                 )
@@ -376,17 +389,20 @@ def make_op(op_class, doc: str | None = None):
             shapes = [x.shape for x in xs]
 
             def run(*los):
+                policy = get_default_policy()
                 blockeds = [
-                    _input_blocked(f, s, dtype) for f, s in zip(filenames, shapes)
+                    _input_blocked(
+                        f, s, dtype, derive_page_shape(policy, dtype, s, num_inputs, "forward")
+                    )
+                    for f, s in zip(filenames, shapes)
                 ]
                 op_impl = op_class.from_inputs(*blockeds, **op_kwargs)
                 out_page_shape = (
                     ()
                     if out_shape == ()
-                    else derive_page_shape(get_default_policy(), dtype, out_shape)
+                    else derive_page_shape(policy, dtype, out_shape, num_inputs, "forward")
                 )
-                policy = get_default_policy()
-                algo = OOCAlgorithm(op_impl, policy)
+                algo = OOCAlgorithm(op_impl)
                 result_ba = algo.run_forward(
                     blockeds, out_page_shape, output_filename=out_path
                 )

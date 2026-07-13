@@ -26,13 +26,15 @@ DISK_DIR = "/home/aadya-chinubhai/Desktop/projects/personal-projects/.benchdata"
 
 
 def make_array(data: np.ndarray, page_shape: tuple) -> DiskArray:
+    # page_shape isn't stored on DiskArray anymore (derived on demand from
+    # the memory budget by jask.dot itself) - kept as a param here only so
+    # the call sites below don't need to change; unused now.
     fd, path = tempfile.mkstemp(suffix=".dat", dir=DISK_DIR)
     os.close(fd)
-    arr = DiskArray.create(path, data.shape, data.dtype, page_shape)
-    mm = arr._mmap(mode="r+")
+    mm = np.memmap(path, dtype=data.dtype, mode="w+", shape=data.shape)
     mm[:] = data
     mm.flush()
-    return arr
+    return DiskArray(path, data.shape, data.dtype)
 
 
 def mean_std(times):
@@ -71,7 +73,7 @@ def main():
         b = make_array(B, page_shape)
         t0 = time.perf_counter()
         y = jask.dot(a, b)
-        arr = np.memmap(y.filename, dtype=y.dtype, mode="r", shape=y.full_shape)
+        arr = np.memmap(y.filename, dtype=y.dtype, mode="r", shape=y.shape)
         corner = np.array(arr[:check_n, :check_n])
         jask_times.append(time.perf_counter() - t0)
         ok = np.allclose(corner, expected_corner, atol=1e-1)

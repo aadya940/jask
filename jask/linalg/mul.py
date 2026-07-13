@@ -95,11 +95,15 @@ class HiScalarMulBackward(VJPHiPrimitive):
     def expand(self, a, scalar, g):
         a_ty = self._a_ty
         grad_a_path = a_ty.to_tangent_aval().filename
-        page_shape = derive_page_shape(get_default_policy(), a_ty.dtype, a_ty.shape)
+        # num_inputs=1: only `a` is an array input - the scalar isn't
+        # tiled/block-resident the way an array operand is.
+        page_shape = derive_page_shape(
+            get_default_policy(), a_ty.dtype, a_ty.shape, num_inputs=1, phase="backward"
+        )
 
         if not _is_tracing(_as_lo(a), _as_lo(scalar), _as_lo(g)):
-            a_blocked = _ensure_on_disk(a)
-            g_blocked = _ensure_on_disk(g)
+            a_blocked = _ensure_on_disk(a, page_shape)
+            g_blocked = _ensure_on_disk(g, page_shape)
             scalar_grad = _tiled_scalar_mul_backward(
                 a_blocked.filename,
                 a_ty.shape,
@@ -154,10 +158,12 @@ class HiScalarMul(VJPHiPrimitive):
     def expand(self, a, scalar):
         a_ty = self._a_ty
         out_path = self._out_path
-        page_shape = derive_page_shape(get_default_policy(), a_ty.dtype, a_ty.shape)
+        page_shape = derive_page_shape(
+            get_default_policy(), a_ty.dtype, a_ty.shape, num_inputs=1, phase="forward"
+        )
 
         if not _is_tracing(_as_lo(a), _as_lo(scalar)):
-            a_blocked = _ensure_on_disk(a)
+            a_blocked = _ensure_on_disk(a, page_shape)
             _tiled_scalar_mul_forward(
                 a_blocked.filename,
                 a_ty.shape,

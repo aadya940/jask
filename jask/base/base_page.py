@@ -10,12 +10,18 @@ boundary.
 This module defines:
 - `IOCost`: a running tally of host-to-device transfers, used to reason
   about and benchmark the cost of a computation.
-- `Policy`: derives how many blocks can be held in flight at once from a
-  user-specified device memory budget and available host memory, so that
-  computation can safely use more than the bare minimum working set
-  without ever exceeding either budget.
+- `Policy`: the process-wide memory budget, set once via `set_memory_budget`.
 - Memory-budget helpers: `set_memory_budget`, `get_default_policy`,
   `derive_page_shape`, `align_to_os_page`.
+
+Block size is derived per op call from `num_inputs`/`phase`/`pipelined`
+(see `_peak_blocks`) - the number of blocks actually resident at once
+differs for a single-input op's forward pass vs. a two-input op's
+backward pass, so a single fixed divisor doesn't correctly bound every
+case. This is still a *static* bound per op-type (known ahead of time,
+not something that changes moment to moment during execution) - not to
+be confused with re-deriving block size based on live conditions, which
+`set_memory_budget`'s one-time clamp below explicitly avoids doing.
 """
 
 from dataclasses import dataclass
@@ -33,44 +39,22 @@ class IOCost:
 
 
 OS_PAGE_SIZE = 4096  # standard OS memory page, bytes
-DASK_DEFAULT_PAGE_SIZE = 128 * 1024 * 1024  # Dask's array.chunk-size default, bytes
 
 
 def align_to_os_page(size: int) -> int:
     """Round a byte size down to the nearest multiple of OS_PAGE_SIZE.
 
     Block boundaries should land on OS page boundaries so disk reads don't
-    span a partial extra page. Has no effect on sizes already aligned (e.g.
-    DASK_DEFAULT_PAGE_SIZE, which is a multiple of OS_PAGE_SIZE already).
+    span a partial extra page.
     """
     return size - (size % OS_PAGE_SIZE)
 
 
 @dataclass
 class Policy:
+    """The process-wide memory budget - see `set_memory_budget`."""
+
     max_memory: int
-    pages_per_group: int
-    page_size: int = align_to_os_page(DASK_DEFAULT_PAGE_SIZE)
-    resident_pages: int = 0
-
-    @property
-    def device_capacity(self) -> int:
-        return self.max_memory // (self.page_size * self.pages_per_group)
-
-    @property
-    def host_capacity(self) -> int:
-        available = psutil.virtual_memory().available
-        return available // (self.page_size * self.pages_per_group)
-
-    @property
-    def working_capacity(self) -> int:
-        return min(self.device_capacity, self.host_capacity)
-
-    def mark_loaded(self):
-        self.resident_pages += 1
-
-    def mark_evicted(self):
-        self.resident_pages = max(0, self.resident_pages - 1)
 
 
 _UNITS = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
@@ -90,7 +74,7 @@ def _parse_memory(value: int | str) -> int:
 _default_policy: Policy | None = None
 
 
-def set_memory_budget(max_memory: int | str, pages_per_group: int = 3):
+def set_memory_budget(max_memory: int | str):
     """Set the process-wide memory budget used by every jask op.
 
     Call this once at the start of your program, not per-op-call. Every
@@ -98,15 +82,22 @@ def set_memory_budget(max_memory: int | str, pages_per_group: int = 3):
     explicit `Policy` uses this budget to decide how large a tile ("page")
     of an array it reads into memory at a time.
 
+    The effective budget is ``min(max_memory, 0.8 * currently available
+    RAM)`` - a one-time safety clamp taken at the moment this function is
+    called, so a budget that doesn't match actual conditions on this
+    machine (e.g. copied from a different machine, or simply optimistic)
+    doesn't go completely unchecked. This is checked once here, not
+    continuously during execution - block size stays fixed for the rest
+    of the session once set, the same way it would if you'd passed a
+    correct value yourself. It does not protect against available memory
+    dropping significantly *after* this call, only against a mismatch
+    that already exists when you call it.
+
     Parameters
     ----------
     max_memory : int or str
         The memory budget, either in bytes (int) or as a string with a
         unit suffix, e.g. ``"4GB"``, ``"512MB"``.
-    pages_per_group : int, optional
-        Divides `max_memory` to leave headroom for more than one tile
-        being resident at once (the previous cached block, the current
-        one, and op-internal scratch space). Default 3.
 
     Examples
     --------
@@ -114,13 +105,10 @@ def set_memory_budget(max_memory: int | str, pages_per_group: int = 3):
     >>> jask.set_memory_budget("4GB")
     """
     global _default_policy
-    max_memory_bytes = _parse_memory(max_memory)
-    page_size = align_to_os_page(max(OS_PAGE_SIZE, max_memory_bytes // pages_per_group))
-    _default_policy = Policy(
-        max_memory=max_memory_bytes,
-        pages_per_group=pages_per_group,
-        page_size=page_size,
-    )
+    user_bytes = _parse_memory(max_memory)
+    available = psutil.virtual_memory().available
+    effective_bytes = min(user_bytes, int(0.8 * available))
+    _default_policy = Policy(max_memory=effective_bytes)
 
 
 def get_default_policy() -> Policy:
@@ -131,13 +119,44 @@ def get_default_policy() -> Policy:
     return _default_policy
 
 
-def derive_page_shape(policy: Policy, dtype: np.dtype, full_shape: tuple) -> tuple:
-    """Pick a block shape whose byte size fits policy.page_size, distributing
-    it evenly across full_shape's dimensions (an N-th root split), clipped
-    so no dimension's block exceeds the array's own extent in that dim.
+def _peak_blocks(num_inputs: int, phase: str, pipelined: bool = False) -> int:
+    """How many blocks are actually resident at once for a given op call -
+    traced precisely from OOCAlgorithm's forward/backward loops:
+    - forward: num_inputs (the reader's cached block per input) + 1
+      (the freshly computed partial) + 1 (the running accumulator).
+    - backward: num_inputs (reader cache) + num_inputs (this k's gradient
+      blocks) + 1 (d_out_block, held for the whole inner loop) + 1
+      (the transient "existing" value during the scatter-write).
+    - pipelined (prefetching the next block while processing the
+      current one) roughly doubles whichever of the above applies, since
+      two blocks' worth of work are in flight instead of one.
     """
+    if phase == "forward":
+        base = num_inputs + 2
+    elif phase == "backward":
+        base = 2 * num_inputs + 2
+    else:
+        raise ValueError(f"phase must be 'forward' or 'backward', got {phase!r}")
+    return base * 2 if pipelined else base
+
+
+def derive_page_shape(
+    policy: Policy,
+    dtype: np.dtype,
+    full_shape: tuple,
+    num_inputs: int,
+    phase: str,
+    pipelined: bool = False,
+) -> tuple:
+    """Pick a block shape sized so that `_peak_blocks` blocks of it fit in
+    `policy.max_memory`, distributing it evenly across full_shape's
+    dimensions (an N-th root split), clipped so no dimension's block
+    exceeds the array's own extent in that dim.
+    """
+    peak = _peak_blocks(num_inputs, phase, pipelined)
     itemsize = np.dtype(dtype).itemsize
-    elements_per_page = max(1, policy.page_size // itemsize)
+    page_size = align_to_os_page(max(OS_PAGE_SIZE, policy.max_memory // peak))
+    elements_per_page = max(1, page_size // itemsize)
     ndim = len(full_shape)
     side = max(1, int(round(elements_per_page ** (1 / ndim))))
     return tuple(min(side, s) for s in full_shape)
